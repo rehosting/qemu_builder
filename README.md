@@ -128,19 +128,45 @@ post-v11.0.0 code. `moved` is a path rewrite; `drift` is auto-resolvable.
 
 ## State — read before relying on this
 
-**Proven:** the series applies 12/12 to the pristine v11.1.0 tarball with strict
-context and reproduces the recorded tree; the gate catches corruption that still
-applies; the ported series is content-identical to the original 38-commit delta
-(625 → 626 added lines, the one difference being a deliberate reflow in
-`hw/i386/pc.c`); `configs/default.json` reproduces the same 11 targets and 11
-libraries as the hardcoded arrays it replaces; the tarball/tag and subproject
-claims above.
+**Proven here:**
 
-**Written but NOT yet built or booted:** `nix/source.nix`, `flake.nix` and the
-config-driven `build.sh`. All three parse; none has completed a QEMU build here.
-The minimal-boot gate is not written yet.
+- The series applies **12/12 to the pristine v11.1.0 tarball with strict context**
+  (`git am`, no `--3way`) and reproduces the recorded tree.
+- The gate catches corruption that still applies: corrupting one line of `0012`
+  still passes 12/12 on step 2 and fails on step 3.
+- `nix build .#src` succeeds — an independent confirmation, since nix's
+  `applyPatches` uses `patch -p1` rather than `git am`.
+- **`nix build` of `penguin-qemu` succeeds** (smoke-tested with
+  `systemArches = "armel,mipseb"`, `enableKvm = false`), producing
+  `libqemu-system-{armel,mipseb}.so`, `qemu-img` (reporting version 11.1.0), the
+  CFFI headers and the compiled env modules.
+- `check-delta-present.sh` finds **22 penguin symbols in each library**, including
+  `helper_penguin_guest_hypercall` at distinct addresses per target — so every
+  per-arch TCG patch genuinely contributed code. Verified to fail on a negative
+  control.
+- The ported series is content-identical to the original 38-commit delta:
+  625 → 626 added lines, the single difference being a deliberate reflow in
+  `hw/i386/pc.c`.
+- `import-series.sh` → `export-series.sh` is **byte-identical** on round-trip, and
+  the patched tree hash is unchanged by it.
+- `configs/default.json` reproduces the same 11 targets and 11 libraries as the
+  hardcoded arrays it replaces.
+- The tarball/tag and subproject claims above.
+
+**Not done yet:**
+
+- **The full 11-target build has not been run** — only the 2-arch smoke build.
+  KVM libraries (`enableKvm = true`) are untested here.
+- **The minimal-boot gate is not written.** `check-delta-present.sh` is the
+  cheaper stand-in and closes part of the same gap; see its header for why the
+  hypercall-round-trip version was declined.
+- **No rehost has been booted** on a v11.1.0-based build. That is the project's
+  real acceptance bar and it is still outstanding.
+- No CI workflows. `.github/workflows/` from the fork was intentionally not
+  carried over yet.
 
 **Deliberately deferred:**
+
 - **byok's `penguin/` tree is not vendored yet.** `origin/workspace/byok` adds
   `penguin/plugins/` + `penguin/tools/` (+1421) and edits `accel/tcg/cputlb.c`
   and `system/runstate.c`. Its `penguin/` tree belongs in `src/`, its two
@@ -152,3 +178,6 @@ The minimal-boot gate is not written yet.
   refactor — but worth revisiting.
 - **The config contract gate** (declared features vs what configure actually
   recorded) is not written; `configs/` is currently data without a gate.
+- `rehosting/qemu` is untouched and still the live repo for byok, qemufeat and
+  qemuci. Freezing it, and flipping `penguin/flake.nix`'s input, are separate
+  later changes.
