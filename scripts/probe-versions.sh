@@ -10,6 +10,13 @@
 #   drift     strict failed, 3-way resolved it  -> context moved, content still fits
 #   moved     a file the patch targets does not exist at this ref -> upstream rename
 #   conflict  3-way failed too -> upstream changed the code we patch
+#
+# PROBE_STRICT_ONLY=1 skips the 3-way attempt and reports every non-strict
+# failure as `conflict`. Use it when the probe runs against a clone that does
+# NOT contain our patches' pre-image blobs -- e.g. a fresh upstream clone in CI.
+# `git am --3way` reconstructs the pre-image from the patch's index-line hashes,
+# so without those blobs it fails for a reason that has nothing to do with
+# upstream drift, and the drift/conflict split would be meaningless.
 set -euo pipefail
 
 VERSION="${1:?usage: probe-versions.sh <series-version> <qemu-git-dir> <ref>...}"
@@ -42,7 +49,9 @@ for REF in "$@"; do
             ok=$((ok+1)); continue
         fi
         git am --abort >/dev/null 2>&1 || true
-        if git -c user.email=p@l -c user.name=p am -q --3way "$PATCHES/$p" >/dev/null 2>&1; then
+        if [ "${PROBE_STRICT_ONLY:-}" = "1" ]; then
+            conflict=$((conflict+1)); notes+=("  conflict $name (strict-only mode)")
+        elif git -c user.email=p@l -c user.name=p am -q --3way "$PATCHES/$p" >/dev/null 2>&1; then
             drift=$((drift+1)); notes+=("  drift    $name")
         else
             git am --abort >/dev/null 2>&1 || true

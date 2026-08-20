@@ -126,6 +126,48 @@ Forward motion is cheap: on a master a week past our base, 11 of 12 patches need
 no human attention. Backward degrades faster, as expected — the patches assume
 post-v11.0.0 code. `moved` is a path rewrite; `drift` is auto-resolvable.
 
+## CI
+
+Four workflows. The shape matters: **everything expensive is gated behind a
+gate that takes minutes.** That is the practical payoff of a patch-based repo
+over a fork — a broken patch fails in `Series`, not two hours into a build.
+
+| workflow | trigger | what it does |
+|---|---|---|
+| `series.yml` | reusable (`workflow_call`) | the fast gate: `verify-series.sh`, config-data validity, and export round-trip |
+| `build.yml` | PRs | `series` → `nix flake check` → `nix build .#dist` → artifact layout → delta-presence → every declared arch has a library |
+| `publish.yml` | **manual only** | `series` → build → release with `SHA256SUMS` and a `BASE` file naming the upstream release |
+| `upstream-canary.yml` | weekly + manual | probes the series against `upstream/master` and files/updates one rolling issue |
+
+`series.yml` has no `pull_request` trigger of its own on purpose — `build.yml`
+and `publish.yml` each call it, so it runs exactly once per event instead of
+twice.
+
+**`publish.yml` is deliberately `workflow_dispatch`-only.** `rehosting/qemu` is
+still the live publisher of `penguin-qemu.tar.gz`, and penguin's non-Nix image
+path resolves a `QEMU_VERSION` release tag. Two repos cutting releases of the
+same artifact under separate version lines is the confusion that
+"non-destructive first" exists to avoid. The `push` trigger is written out and
+commented; uncomment it when `rehosting/qemu` is frozen.
+
+### Two things the round-trip check buys
+
+`series.yml` runs `import-series.sh` → `export-series.sh` → `git diff --exit-code`.
+That catches a patch hand-edited into a form the tooling would not emit — the
+slow drift where a committed series stops matching its own scripts. It only works
+because the exporter is deterministic (`--no-numbered --zero-commit
+--full-index`); before that fix a no-change export diffed every file.
+
+### The canary over-reports, on purpose
+
+It runs `PROBE_STRICT_ONLY=1`, because `git am --3way` rebuilds a patch's
+pre-image from its index-line blob hashes and a fresh upstream clone has none of
+our blobs. Strict apply needs no blobs. The cost is that context drift and real
+conflicts collapse into one bucket: measured against `upstream/master`, a
+full-clone probe says `ok=9 drift=2 conflict=1` while the canary says
+`ok=9 conflict=3`. The reported number is an upper bound and the issue body says
+so — run `probe-versions.sh` locally against a full clone for the real split.
+
 ## State — read before relying on this
 
 **Proven here:**
@@ -162,8 +204,9 @@ post-v11.0.0 code. `moved` is a path rewrite; `drift` is auto-resolvable.
   hypercall-round-trip version was declined.
 - **No rehost has been booted** on a v11.1.0-based build. That is the project's
   real acceptance bar and it is still outstanding.
-- No CI workflows. `.github/workflows/` from the fork was intentionally not
-  carried over yet.
+- **The CI workflows have never run.** They are written and their YAML, inline
+  Python and shell helpers were exercised locally, but no job has executed on
+  `rehosting-arc`. Expect the first PR to shake out runner-environment issues.
 
 **Deliberately deferred:**
 

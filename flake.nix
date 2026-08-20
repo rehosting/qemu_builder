@@ -43,8 +43,14 @@
         packages = {
           inherit penguin-qemu src;
           default = penguin-qemu;
-          # The unpacked release artifact, for CI publish.
-          dist = penguin-qemu.dist;
+          # The release artifact, exposed as a SINGLE-output derivation whose
+          # $out IS the tarball file. `nix build` on the multi-output
+          # `penguin-qemu.dist` would link `result` to the default `out` (the
+          # unpacked tree) instead, so `cp result penguin-qemu.tar.gz` would
+          # silently copy a directory. rehosting/qemu hit exactly this.
+          dist = pkgs.runCommand "penguin-qemu.tar.gz" { } ''
+            cp ${penguin-qemu.dist}/penguin-qemu.tar.gz "$out"
+          '';
         };
 
         # `nix flake check` runs the series gate: the patches must apply to the
