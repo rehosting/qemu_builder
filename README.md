@@ -216,14 +216,25 @@ so — run `probe-versions.sh` locally against a full clone for the real split.
   still passes 12/12 on step 2 and fails on step 3.
 - `nix build .#src` succeeds — an independent confirmation, since nix's
   `applyPatches` uses `patch -p1` rather than `git am`.
-- **`nix build` of `penguin-qemu` succeeds** (smoke-tested with
-  `systemArches = "armel,mipseb"`, `enableKvm = false`), producing
-  `libqemu-system-{armel,mipseb}.so`, `qemu-img` (reporting version 11.1.0), the
-  CFFI headers and the compiled env modules.
-- `check-delta-present.sh` finds **22 penguin symbols in each library**, including
-  `helper_penguin_guest_hypercall` at distinct addresses per target — so every
-  per-arch TCG patch genuinely contributed code. Verified to fail on a negative
-  control.
+- **`nix build` of `penguin-qemu` succeeds on the full matrix**: all **14**
+  declared arches produce a library, plus `libqemu-kvm-x86_64.so`, along with
+  `qemu-img` (reporting version 11.1.0), the CFFI headers and the compiled env
+  modules. Verified with the current 30-flag feature set.
+- **`Series` CI is green on `rehosting-arc`**, and the patched tree hash it
+  computes there is byte-identical to the local one
+  (`1b1a352f65bfe14e1b7cfe4c7c5890cdaf7f939c`) — so the series is reproducible
+  across machines, and the python-`lzma` extraction path produces the same tree
+  as real `xz`. The gate runs in about two minutes.
+- **All 12 declared `nixDeps` are in the built artifact's runtime closure**, and
+  every `--enable-*` is observably linked (`libcapstone.so.5`, `libcurl`,
+  `libiscsi`, `libnfs`, `libusb`, `libusbredirparser`, `liblzo2`, `libsnappy`,
+  `libbz2`, `libpng16`, `libjpeg`, `librdmacm` + `libibverbs`). VNC is in, with
+  262 `vnc_` symbols and the `RFB 003` handshake string.
+- `check-delta-present.sh` passes on all 14 libraries. It distinguishes the two
+  guest-entry paths: 12 targets carry `helper_penguin_guest_hypercall` (22 penguin
+  symbols each), while x86 carries the port-0x88 `penguin-hypercall` MemoryRegion
+  literal instead (20 symbols) — x86 has no TCG helper by design. Verified to
+  fail on a negative control.
 - The ported series is content-identical to the original 38-commit delta:
   625 → 626 added lines, the single difference being a deliberate reflow in
   `hw/i386/pc.c`.
@@ -235,16 +246,15 @@ so — run `probe-versions.sh` locally against a full clone for the real split.
 
 **Not done yet:**
 
-- **The full 11-target build has not been run** — only the 2-arch smoke build.
-  KVM libraries (`enableKvm = true`) are untested here.
+- **`build.yml`, `publish.yml` and the canary have never executed.** Only
+  `series.yml` has run. `build.yml` is PR-triggered, so it needs a PR.
 - **The minimal-boot gate is not written.** `check-delta-present.sh` is the
   cheaper stand-in and closes part of the same gap; see its header for why the
   hypercall-round-trip version was declined.
 - **No rehost has been booted** on a v11.1.0-based build. That is the project's
   real acceptance bar and it is still outstanding.
-- **The CI workflows have never run.** They are written and their YAML, inline
-  Python and shell helpers were exercised locally, but no job has executed on
-  `rehosting-arc`. Expect the first PR to shake out runner-environment issues.
+- The first CI run found a real runner-environment issue — the Arc pods ship
+  `tar` but not the `xz` binary — now fixed via a python-`lzma` fallback.
 
 **Deliberately deferred:**
 
