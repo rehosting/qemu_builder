@@ -1,7 +1,7 @@
-From 59044059109f97a18a1a480596ee28a7a487f903 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: igloo <nix@local>
 Date: Wed, 19 Aug 2026 23:02:41 -0400
-Subject: [PATCH 01/12] penguin: core callbacks and build wiring
+Subject: [PATCH] penguin: core callbacks and build wiring
 
 Adds system/penguin.c to the system build, declares the after-guest-init
 callback registration API, and invokes it from vl.c once the machine is up.
@@ -18,7 +18,7 @@ Folds: 0e5c47a539, 797f446cf8 (partial), c89b0d5bf4
  3 files changed, 51 insertions(+)
 
 diff --git a/include/system/system.h b/include/system/system.h
-index 03a2d0e900..9344241fc4 100644
+index 03a2d0e9005d666cd4a3e0b2ed68931e700a5dad..9344241fc4fa3b991857a45c14ab561ef76fcbbb 100644
 --- a/include/system/system.h
 +++ b/include/system/system.h
 @@ -4,6 +4,7 @@
@@ -42,7 +42,7 @@ index 03a2d0e900..9344241fc4 100644
  
  void qemu_init_subsystems(void);
 diff --git a/system/meson.build b/system/meson.build
-index cd3193d170..10c41e7090 100644
+index cd3193d170b2b5759cb34e4087a6d0ebfa805287..10c41e709040ac1a37a215dcb9930951ba2c1ea9 100644
 --- a/system/meson.build
 +++ b/system/meson.build
 @@ -17,6 +17,7 @@ system_ss.add(files(
@@ -54,7 +54,7 @@ index cd3193d170..10c41e7090 100644
    'qdev-monitor.c',
    'qtest.c',
 diff --git a/system/vl.c b/system/vl.c
-index 061cbdf860..67ad72c90a 100644
+index 061cbdf860bfc5f056aab26f347eeea0b82dc4e8..67ad72c90a092697f0a593d2bb7816dbabe00c22 100644
 --- a/system/vl.c
 +++ b/system/vl.c
 @@ -194,6 +194,9 @@ static const char *log_file;

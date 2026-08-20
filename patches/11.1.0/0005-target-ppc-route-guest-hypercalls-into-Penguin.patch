@@ -1,7 +1,7 @@
-From 6c027677e706133364e99ed44716ac7eaf1afe49 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: igloo <nix@local>
 Date: Wed, 19 Aug 2026 23:02:41 -0400
-Subject: [PATCH 05/12] target/ppc: route guest hypercalls into Penguin
+Subject: [PATCH] target/ppc: route guest hypercalls into Penguin
 
 Same helper as the other targets, reached from the fixed-point translator.
 
@@ -13,7 +13,7 @@ Folds: 797f446cf8 (partial), d7f87bf73e (partial), 087a668076 (partial)
  3 files changed, 22 insertions(+)
 
 diff --git a/target/ppc/helper.h b/target/ppc/helper.h
-index 6b2d19a3ad..1699c3348b 100644
+index 6b2d19a3ad9bad68cb5be775f7b4842621013b8b..1699c3348b8f43d4956fb96b12058eca1231fbf7 100644
 --- a/target/ppc/helper.h
 +++ b/target/ppc/helper.h
 @@ -4,6 +4,7 @@ DEF_HELPER_FLAGS_4(TW, TCG_CALL_NO_WG, void, env, tl, tl, i32)
@@ -25,7 +25,7 @@ index 6b2d19a3ad..1699c3348b 100644
  DEF_HELPER_4(HASHCHK, void, env, tl, tl, tl)
  DEF_HELPER_4(HASHSTP, void, env, tl, tl, tl)
 diff --git a/target/ppc/misc_helper.c b/target/ppc/misc_helper.c
-index 0e625cbb70..bfa048a59f 100644
+index 0e625cbb704d9f689abd1de6357f8646609c3298..bfa048a59f226efbded0f1585cd61e4b80cd37d1 100644
 --- a/target/ppc/misc_helper.c
 +++ b/target/ppc/misc_helper.c
 @@ -26,6 +26,7 @@
@@ -58,7 +58,7 @@ index 0e625cbb70..bfa048a59f 100644
                                     target_ulong val)
  {
 diff --git a/target/ppc/translate/fixedpoint-impl.c.inc b/target/ppc/translate/fixedpoint-impl.c.inc
-index fa0191e866..90fd913911 100644
+index fa0191e8664290b5eb5cd703adb566613430f74e..90fd9139113b6dbed4c2672f6ba50a77162e41c0 100644
 --- a/target/ppc/translate/fixedpoint-impl.c.inc
 +++ b/target/ppc/translate/fixedpoint-impl.c.inc
 @@ -880,6 +880,12 @@ static bool do_ori(DisasContext *ctx, arg_D_ui *a, bool shift)

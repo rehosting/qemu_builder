@@ -1,8 +1,7 @@
-From 35df2526181a20a6876ad16e979a28a0d7361c76 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: igloo <nix@local>
 Date: Wed, 19 Aug 2026 23:02:41 -0400
-Subject: [PATCH 02/12] build: emit shared libraries for the Penguin embedding
- API
+Subject: [PATCH] build: emit shared libraries for the Penguin embedding API
 
 Penguin drives QEMU as a library through CFFI, not as a subprocess, so each
 softmmu target must also be linked as a shared object.
@@ -19,7 +18,7 @@ Folds: 67bfb34d25, 797f446cf8 (partial)
  1 file changed, 33 insertions(+), 1 deletion(-)
 
 diff --git a/meson.build b/meson.build
-index 49a5baf5b5..471f3f9964 100644
+index 49a5baf5b52fd257001b81d4212a129a0315cd11..471f3f9964bb9129ed344d0615c9b87e858d5ca9 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -1,6 +1,6 @@

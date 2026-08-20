@@ -1,7 +1,7 @@
-From 6644aeaefe9f6df05d578150fac5392221280af1 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: igloo <nix@local>
 Date: Wed, 19 Aug 2026 23:02:41 -0400
-Subject: [PATCH 10/12] penguin: snapshot ABI and a migratable vhost-user-vsock
+Subject: [PATCH] penguin: snapshot ABI and a migratable vhost-user-vsock
 
 Exposes savevm/loadvm to Penguin, and makes vhost-user-vsock migratable so a
 snapshot taken with the guest command channel open can be restored. Without
@@ -17,7 +17,7 @@ Folds: 61b39d3eba, 3795e4c1ed
  4 files changed, 141 insertions(+), 14 deletions(-)
 
 diff --git a/hw/virtio/vhost-user-vsock.c b/hw/virtio/vhost-user-vsock.c
-index c2cd376e73..503da163b1 100644
+index c2cd376e7326b19cdd3d34fb1464c4dcd12194a8..503da163b1a914e71402ca956a8a0eaf62f94a14 100644
 --- a/hw/virtio/vhost-user-vsock.c
 +++ b/hw/virtio/vhost-user-vsock.c
 @@ -12,6 +12,7 @@
@@ -187,7 +187,7 @@ index c2cd376e73..503da163b1 100644
  
      vhost_vsock_common_unrealize(vdev);
 diff --git a/include/hw/virtio/vhost-user-vsock.h b/include/hw/virtio/vhost-user-vsock.h
-index 5db6938b8b..1c57674151 100644
+index 5db6938b8b1ca2b23761ca1d2ba37d08ae7ee26c..1c57674151be5845185785b08bc2ab37b831149d 100644
 --- a/include/hw/virtio/vhost-user-vsock.h
 +++ b/include/hw/virtio/vhost-user-vsock.h
 @@ -29,6 +29,7 @@ struct VHostUserVSock {
@@ -199,7 +199,7 @@ index 5db6938b8b..1c57674151 100644
      /*< public >*/
  };
 diff --git a/include/migration/snapshot.h b/include/migration/snapshot.h
-index 9e4dcaaa75..0629dc90be 100644
+index 9e4dcaaa7510e1aa6738c8c06b74bb60d6b9db1a..0629dc90be4f93c26641eaf530a5865ec139df85 100644
 --- a/include/migration/snapshot.h
 +++ b/include/migration/snapshot.h
 @@ -68,4 +68,12 @@ bool delete_snapshot(const char *name,
@@ -216,7 +216,7 @@ index 9e4dcaaa75..0629dc90be 100644
 +
  #endif
 diff --git a/migration/savevm.c b/migration/savevm.c
-index 34dd06f9f7..d3b7ecfd05 100644
+index 34dd06f9f732dee7d3c6d0458da8bb67f23d76b4..d3b7ecfd05b0fb6b5d3692154fe952e24816471d 100644
 --- a/migration/savevm.c
 +++ b/migration/savevm.c
 @@ -3257,6 +3257,21 @@ bool qemu_loadvm_load_state_buffer(const char *idstr, uint32_t instance_id,

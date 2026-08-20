@@ -1,7 +1,7 @@
-From dd76c0b081dbcb6572af8c8530af5b3360c0cd16 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: igloo <nix@local>
 Date: Wed, 19 Aug 2026 23:02:41 -0400
-Subject: [PATCH 03/12] target/mips: route guest hypercalls into Penguin
+Subject: [PATCH] target/mips: route guest hypercalls into Penguin
 
 Adds helper_penguin_guest_hypercall, which forwards the hypercall number and
 six arguments to penguin_handle_guest_hypercall and returns the guest-visible
@@ -20,7 +20,7 @@ Folds: 797f446cf8 (partial), d7f87bf73e (partial), 24e2827eb4, 80037d53e0,
  3 files changed, 35 insertions(+), 2 deletions(-)
 
 diff --git a/target/mips/helper.h b/target/mips/helper.h
-index 786117813a..302216844b 100644
+index 786117813aebc5f0f2ef334451b2cdfd46df0b35..302216844bb1e9732a38e9e89ca87465e61d45b8 100644
 --- a/target/mips/helper.h
 +++ b/target/mips/helper.h
 @@ -1,6 +1,7 @@
@@ -32,7 +32,7 @@ index 786117813a..302216844b 100644
  #ifdef TARGET_MIPS64
  DEF_HELPER_4(sdl, void, env, tl, tl, int)
 diff --git a/target/mips/tcg/op_helper.c b/target/mips/tcg/op_helper.c
-index df1b5c3734..497eb25209 100644
+index df1b5c37347e38b226596a360aa8c5cd6f8d7faf..497eb25209d1ab924ad503f1be34d1ad275e7154 100644
 --- a/target/mips/tcg/op_helper.c
 +++ b/target/mips/tcg/op_helper.c
 @@ -26,6 +26,7 @@
@@ -65,7 +65,7 @@ index df1b5c3734..497eb25209 100644
                          uint32_t stripe)
  {
 diff --git a/target/mips/tcg/translate.c b/target/mips/tcg/translate.c
-index e3467d1525..a738c3d7be 100644
+index e3467d152516394064e71be362012cdff7e96aa8..a738c3d7be75f208167d8e2e319b6ee3d2597fd0 100644
 --- a/target/mips/tcg/translate.c
 +++ b/target/mips/tcg/translate.c
 @@ -2724,8 +2724,21 @@ static void gen_cond_move(DisasContext *ctx, uint32_t opc,

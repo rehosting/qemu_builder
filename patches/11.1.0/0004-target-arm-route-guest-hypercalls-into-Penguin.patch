@@ -1,7 +1,7 @@
-From 4677ec4211c1ebf0f4bca4968a74f47165056b59 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: igloo <nix@local>
 Date: Wed, 19 Aug 2026 23:02:41 -0400
-Subject: [PATCH 04/12] target/arm: route guest hypercalls into Penguin
+Subject: [PATCH] target/arm: route guest hypercalls into Penguin
 
 Same helper as the other targets. Unhandled hypercalls return the first
 argument unchanged. Hooks both the A32/T32 and A64 translators; the A64 side
@@ -17,7 +17,7 @@ Folds: 797f446cf8 (partial), d7f87bf73e (partial), 087a668076 (partial)
  5 files changed, 50 insertions(+)
 
 diff --git a/target/arm/tcg/a64.decode b/target/arm/tcg/a64.decode
-index b5de5d5a02..f6aff3a7c9 100644
+index b5de5d5a0279beec170af7cd29afba6ce992f29f..f6aff3a7c97b356d76b05619010ab06b447d7f39 100644
 --- a/target/arm/tcg/a64.decode
 +++ b/target/arm/tcg/a64.decode
 @@ -314,6 +314,7 @@ MSR_i_SVCR      1101 0101 0000 0 011 0100 0 mask:2 imm:1 011 11111
@@ -29,7 +29,7 @@ index b5de5d5a02..f6aff3a7c9 100644
  SYS             1101 0101 00 l:1 10 op1:3 crn:4 crm:4 op2:3 rt:5 op0=2
  SYS             1101 0101 00 l:1 11 op1:3 crn:4 crm:4 op2:3 rt:5 op0=3
 diff --git a/target/arm/tcg/helper-defs.h b/target/arm/tcg/helper-defs.h
-index 0077aeb4e2..350f54e229 100644
+index 0077aeb4e228bc69dff7111b110104b01c230400..350f54e2290e8dd3d162f43b7dc01b3ef1d90beb 100644
 --- a/target/arm/tcg/helper-defs.h
 +++ b/target/arm/tcg/helper-defs.h
 @@ -60,6 +60,7 @@ DEF_HELPER_2(wfet, void, env, i32)
@@ -41,7 +41,7 @@ index 0077aeb4e2..350f54e229 100644
  DEF_HELPER_1(sev, void, env)
  
 diff --git a/target/arm/tcg/op_helper.c b/target/arm/tcg/op_helper.c
-index c4433be2ed..943e0129e6 100644
+index c4433be2ed0ac6644e8a248b1b28839bb652ea7e..943e0129e6a02892383353a73b41bbec790ed6ea 100644
 --- a/target/arm/tcg/op_helper.c
 +++ b/target/arm/tcg/op_helper.c
 @@ -26,6 +26,7 @@
@@ -74,7 +74,7 @@ index c4433be2ed..943e0129e6 100644
                            uint64_t ireg, uint64_t def)
  {
 diff --git a/target/arm/tcg/translate-a64.c b/target/arm/tcg/translate-a64.c
-index 1780490065..8c5a6d9eaf 100644
+index 1780490065e14fe81fe56513e24484c56f3a542f..8c5a6d9eafd162dd0768ca70f7b034e8cf29d79e 100644
 --- a/target/arm/tcg/translate-a64.c
 +++ b/target/arm/tcg/translate-a64.c
 @@ -3278,6 +3278,15 @@ static bool trans_SYS(DisasContext *s, arg_SYS *a)
@@ -94,7 +94,7 @@ index 1780490065..8c5a6d9eaf 100644
  {
      /*
 diff --git a/target/arm/tcg/translate.c b/target/arm/tcg/translate.c
-index 055f3c5b40..74822d430d 100644
+index 055f3c5b40371616aecf2c4a36cd220abed3bd38..74822d430dd95e10288ec0e33c2fd1685ae6df78 100644
 --- a/target/arm/tcg/translate.c
 +++ b/target/arm/tcg/translate.c
 @@ -2345,6 +2345,30 @@ static bool valid_cp(DisasContext *s, int cp)

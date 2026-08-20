@@ -1,7 +1,7 @@
-From 0c9f8a8b28d646c2c770e5ea0592af8c10501abd Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: igloo <nix@local>
 Date: Wed, 19 Aug 2026 23:02:41 -0400
-Subject: [PATCH 06/12] target/riscv: route guest hypercalls into Penguin
+Subject: [PATCH] target/riscv: route guest hypercalls into Penguin
 
 Same helper as the other targets.
 
@@ -17,7 +17,7 @@ Folds: 797f446cf8 (partial), d7f87bf73e (partial), 087a668076 (partial)
  3 files changed, 27 insertions(+)
 
 diff --git a/target/riscv/helper.h b/target/riscv/helper.h
-index 542b7c264f..2da85dfe8d 100644
+index 542b7c264fc057b6ed5766cff20455291e6db909..2da85dfe8d3230253d3817ae6ed6c2af6a45e781 100644
 --- a/target/riscv/helper.h
 +++ b/target/riscv/helper.h
 @@ -1,5 +1,6 @@
@@ -28,7 +28,7 @@ index 542b7c264f..2da85dfe8d 100644
  /* Floating Point - rounding mode */
  DEF_HELPER_FLAGS_2(set_rounding_mode, TCG_CALL_NO_WG, void, env, i32)
 diff --git a/target/riscv/tcg/op_helper.c b/target/riscv/tcg/op_helper.c
-index ba3c7da375..e940381eb6 100644
+index ba3c7da375a2fe822ded6426ac92d6a568175600..e940381eb641bc306d393b9cd99aa5c768d6fe7a 100644
 --- a/target/riscv/tcg/op_helper.c
 +++ b/target/riscv/tcg/op_helper.c
 @@ -29,6 +29,7 @@
@@ -61,7 +61,7 @@ index ba3c7da375..e940381eb6 100644
  {
      /*
 diff --git a/target/riscv/tcg/translate.c b/target/riscv/tcg/translate.c
-index 9684dbe752..0418e153d4 100644
+index 9684dbe7528e3555114b53b93305b80bb4b1ddc1..0418e153d47cdc4949409e23a2ba92c2f568868e 100644
 --- a/target/riscv/tcg/translate.c
 +++ b/target/riscv/tcg/translate.c
 @@ -866,6 +866,17 @@ static int ex_rvc_shiftri(DisasContext *ctx, int imm)

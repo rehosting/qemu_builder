@@ -1,7 +1,7 @@
-From 5514c9b41e45daf65e44bdddb348a2d8e291bf39 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: igloo <nix@local>
 Date: Wed, 19 Aug 2026 23:02:41 -0400
-Subject: [PATCH 09/12] kvm: expose hypercall and port-I/O exits to Penguin
+Subject: [PATCH] kvm: expose hypercall and port-I/O exits to Penguin
 
 Enables KVM_CAP_EXIT_HYPERCALL where the host supports it and routes
 KVM_EXIT_HYPERCALL and port-I/O exits to penguin_handle_guest_hypercall, so a
@@ -16,7 +16,7 @@ Folds: 8f837df542, 644b68587a, 797f446cf8 (partial), c26a90a771 (partial),
  3 files changed, 117 insertions(+), 7 deletions(-)
 
 diff --git a/accel/kvm/kvm-all.c b/accel/kvm/kvm-all.c
-index 83cbd120a8..35bb0ba8d1 100644
+index 83cbd120a84784e3128812c22be952e7af2b5480..35bb0ba8d1acf7fb9cce8c193697a79b761bacc3 100644
 --- a/accel/kvm/kvm-all.c
 +++ b/accel/kvm/kvm-all.c
 @@ -3509,12 +3509,16 @@ int kvm_cpu_exec(CPUState *cpu)
@@ -43,7 +43,7 @@ index 83cbd120a8..35bb0ba8d1 100644
          case KVM_EXIT_MMIO:
              /* Called outside BQL */
 diff --git a/target/arm/kvm.c b/target/arm/kvm.c
-index d40a6a9859..e7294ed8f0 100644
+index d40a6a9859142ef74937a3b8c1804387fec7e9e4..e7294ed8f0ec5bf15b4e6b873329b24ca5bb0e1d 100644
 --- a/target/arm/kvm.c
 +++ b/target/arm/kvm.c
 @@ -42,6 +42,7 @@
@@ -88,7 +88,7 @@ index d40a6a9859..e7294ed8f0 100644
          if (kvm_arm_handle_debug(cpu, &run->debug.arch)) {
              ret = EXCP_DEBUG;
 diff --git a/target/i386/kvm/kvm.c b/target/i386/kvm/kvm.c
-index 4272b6770c..b5d9c18bd7 100644
+index 4272b6770c7c9e3907a8f4de2c3234378f16482e..b5d9c18bd76f26562bffe6688cb535a9b163d3ff 100644
 --- a/target/i386/kvm/kvm.c
 +++ b/target/i386/kvm/kvm.c
 @@ -31,6 +31,7 @@
