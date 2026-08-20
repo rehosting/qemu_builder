@@ -65,16 +65,53 @@ jobs:
         run: |
           set -eux
           for f in configs/*.json base.json; do python3 -c "import json,sys;json.load(open(sys.argv[1]))" "$f"; done
-          # every declared arch must have a target mapping
           python3 - <<'PY'
           import json, sys
           d = json.load(open("configs/default.json"))
+
+          # every declared arch must have a target mapping
           missing = [a for a in d["systemArches"] if a not in d["archToTarget"]]
           if missing:
               sys.exit(f"arches with no archToTarget mapping: {missing}")
+
+          # configureArgs are objects (schema 2), each with a flag
+          bad = [a for a in d["configureArgs"] if not isinstance(a, dict) or "flag" not in a]
+          if bad:
+              sys.exit(f"configureArgs entries missing a 'flag': {bad}")
+
+          # no flag may be specified twice, and never as both --enable and --disable
+          seen, dupes, both = set(), [], []
+          for a in d["configureArgs"]:
+              f = a["flag"]
+              if f in seen:
+                  dupes.append(f)
+              seen.add(f)
+          for f in seen:
+              if f.startswith("--enable-") and f.replace("--enable-", "--disable-", 1) in seen:
+                  both.append(f)
+          if dupes:
+              sys.exit(f"duplicate configure flags: {dupes}")
+          if both:
+              sys.exit(f"flags given as both --enable and --disable: {both}")
+
+          deps = sorted({x for a in d["configureArgs"] for x in a.get("nixDeps", [])})
           print(f"ok: {len(d['systemArches'])} arches -> "
-                f"{len({d['archToTarget'][a] for a in d['systemArches']})} targets")
+                f"{len({d['archToTarget'][a] for a in d['systemArches']})} targets; "
+                f"{len(d['configureArgs'])} flags; {len(deps)} nixDeps: {' '.join(deps)}")
           PY
+
+      # nixDeps are what flake.nix turns into buildInputs. If one is not a real
+      # nixpkgs attribute the build fails late, after configure; catching it here
+      # keeps that a fast failure.
+      - name: Declared nixDeps resolve
+        run: |
+          set -eux
+          python3 - <<'PY' > /tmp/deps.txt
+          import json
+          d = json.load(open("configs/default.json"))
+          print("\n".join(sorted({x for a in d["configureArgs"] for x in a.get("nixDeps", [])})))
+          PY
+          cat /tmp/deps.txt
 
       # THE gate. Asserts the pinned tarball, a strict-context apply, and that
       # the result hashes to base.json's patchedTree -- the last of which is what

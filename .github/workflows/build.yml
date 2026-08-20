@@ -77,6 +77,13 @@ jobs:
           nix build -L .#penguin-qemu --out-link built
           ./scripts/check-delta-present.sh built
 
+      # configs/default.json's --enable-* group is a set of HARD enables, so a
+      # missing library is a configure failure. The subtler drift this catches:
+      # a flag flipped to --disable-* while its nixDep stays declared, silently
+      # dropping a feature.
+      - name: Config contract — declared nixDeps are in the runtime closure
+        run: ./scripts/check-config-contract.sh "$(readlink -f built)"
+
       - name: Every declared arch produced a library
         run: |
           set -eu

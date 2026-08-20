@@ -35,6 +35,11 @@
   libcap_ng,
   libslirp, # satisfies the slirp.wrap with the system lib (no network)
   dtc, # provides libfdt (--enable-fdt=system) and the dtc compiler
+  # Libraries backing the --enable-* group. NOT hand-listed here: flake.nix
+  # derives them from configs/<profile>.json's `nixDeps`, so the flag list and
+  # the dependency list cannot drift apart. rehosting/qemu keeps the same two
+  # lists in two files with a comment asking a human to sync them.
+  extraBuildInputs ? [ ],
   # Restrict the built system arch set if desired (build.sh's default covers
   # the full Penguin matrix). Comma-separated, matching PENGUIN_SYSTEM_ARCHES.
   systemArches ? null,
@@ -84,7 +89,8 @@ stdenv.mkDerivation {
     libcap_ng
     libslirp
     dtc
-  ];
+  ]
+  ++ extraBuildInputs;
 
   # The store source is read-only but build.sh writes build-system/ and
   # pyvenv/ into the tree, so work from a writable copy.

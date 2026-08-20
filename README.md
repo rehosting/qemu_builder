@@ -71,6 +71,44 @@ Both verified against v11.1.0, not assumed:
 - QEMU has 15 git submodules (`roms/*`, `tests/lcitool`). The series touches
   none of them, and a tarball base avoids fetching them entirely.
 
+## Configs are data, and so are their dependencies
+
+`configs/<profile>.json` holds the configure feature set. Entries are objects,
+not strings:
+
+```json
+{ "flag": "--enable-capstone",
+  "why":  "QEMU's own disassembler ... the one genuinely new dependency at ~29 MB",
+  "nixDeps": ["capstone"] }
+```
+
+Three things that buys over a shell array:
+
+1. **The rationale survives.** `rehosting/qemu`'s `build.sh` carries ~40 lines of
+   carefully-costed justification in comments. Flattening that into a JSON list
+   of strings would have thrown it away; `why` keeps it, and keeps it queryable.
+2. **The flag list and the dependency list cannot drift.** `nix/qemu.nix` no
+   longer hand-lists the twelve libraries backing the `--enable-*` group —
+   `flake.nix` derives `buildInputs` from `nixDeps`. `rehosting/qemu` keeps the
+   same two lists in two files with a comment asking a human to sync them; these
+   are *hard* enables, so a desync is a configure failure. Here it is
+   unrepresentable.
+3. **CI can check the set for incoherence** — duplicate flags, and any flag
+   present as both `--enable-` and `--disable-`.
+
+`build.sh` reads `.flag`; nothing else needs to know the schema.
+
+`scripts/check-config-contract.sh` is the gate: it asserts every declared
+`nixDep` is in the built artifact's **runtime closure**. Two things it has to get
+right, both of which bit during development —
+
+- it resolves deps through **this flake's** pinned nixpkgs, not `<nixpkgs>`; the
+  channel is a different revision, so the store hashes never match and all
+  twelve deps look absent
+- it accepts **any output** of a dep, because nixpkgs' default output is not
+  always the linked one: `curl`, `bzip2` and `libjpeg` default to `bin` while the
+  closure carries their `lib` output
+
 ## The gate
 
 ```bash
@@ -219,8 +257,7 @@ so — run `probe-versions.sh` locally against a full clone for the real split.
   `ioportF0_io` region to `OBJECT(pcms)`; our `ioport88_io` still passes `NULL`.
   Preserved deliberately — a port should not absorb an unrelated ownership
   refactor — but worth revisiting.
-- **The config contract gate** (declared features vs what configure actually
-  recorded) is not written; `configs/` is currently data without a gate.
+- Nothing further on configs: the contract gate landed (see below).
 - `rehosting/qemu` is untouched and still the live repo for byok, qemufeat and
   qemuci. Freezing it, and flipping `penguin/flake.nix`'s input, are separate
   later changes.

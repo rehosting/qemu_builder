@@ -26,7 +26,7 @@ import json,sys
 d=json.load(open('$CONFIG'))
 $1" ; }
 
-mapfile -t COMMON_CONFIGURE_ARGS < <(read_cfg "print('\n'.join(d['configureArgs']))")
+mapfile -t COMMON_CONFIGURE_ARGS < <(read_cfg "print('\n'.join(a['flag'] for a in d['configureArgs']))")
 PENGUIN_SYSTEM_ARCHES="${PENGUIN_SYSTEM_ARCHES:-$(read_cfg "print(','.join(d['systemArches']))")}"
 
 echo ">>> profile $PROFILE: ${#COMMON_CONFIGURE_ARGS[@]} configure args, arches: $PENGUIN_SYSTEM_ARCHES"

@@ -34,14 +34,48 @@
           inherit version base;
         };
 
+        # The feature set is data, and so are the libraries it needs. Deriving
+        # buildInputs from the same JSON that supplies the configure flags means
+        # an --enable-* can never be added without its dependency: these are
+        # hard enables, so a missing library is a configure failure.
+        featureCfg = builtins.fromJSON (builtins.readFile ./configs/default.json);
+        nixDepNames = pkgs.lib.unique (
+          pkgs.lib.concatMap (a: a.nixDeps or [ ]) featureCfg.configureArgs
+        );
+        extraBuildInputs = map (
+          n:
+          pkgs.${n} or (throw "configs/default.json names nixDep '${n}', which is not in nixpkgs")
+        ) nixDepNames;
+
         penguin-qemu = pkgs.callPackage ./nix/qemu.nix {
-          inherit src;
+          inherit src extraBuildInputs;
           version = "${base.tag}-igloo";
         };
       in
       {
         packages = {
           inherit penguin-qemu src;
+
+          # Introspection for scripts/check-config-contract.sh: the store paths
+          # of the libraries configs/default.json declares. It MUST come from
+          # this flake's pinned nixpkgs -- resolving them through <nixpkgs>
+          # instead compares against the channel's revision, whose store hashes
+          # differ, and every dep then looks absent.
+          # One line per declared dep: "<attr> <output-path>...". ALL outputs are
+          # listed, because nixpkgs' default output is not always the one that
+          # ends up linked: curl, bzip2 and libjpeg default to `bin` while the
+          # runtime closure carries their lib output. Checking only the default
+          # output reports those three as missing when they are present.
+          declaredNixDeps = pkgs.writeText "declared-nix-deps" (
+            pkgs.lib.concatMapStrings (
+              n:
+              let
+                p = pkgs.${n};
+                outs = if p ? all then p.all else [ p ];
+              in
+              "${n} ${toString (map (o: o.outPath) outs)}\n"
+            ) nixDepNames
+          );
           default = penguin-qemu;
           # The release artifact, exposed as a SINGLE-output derivation whose
           # $out IS the tarball file. `nix build` on the multi-output
