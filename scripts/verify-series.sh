@@ -27,6 +27,8 @@ RECORD="${3:-}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PATCHES="$REPO_ROOT/patches"
+# shellcheck source=scripts/lib-extract.sh
+. "$REPO_ROOT/scripts/lib-extract.sh"
 BASE_JSON="$REPO_ROOT/base.json"
 
 read -r WANT_SHA WANT_TREE < <(python3 - "$BASE_JSON" "$VERSION" <<'PY'
@@ -47,8 +49,7 @@ fi
 echo "    ok  $GOT_SHA"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
-mkdir -p "$WORK/src"
-tar xf "$TARBALL" -C "$WORK/src" --strip-components=1
+extract_tarball "$TARBALL" "$WORK/src"
 cd "$WORK/src"
 git init -q .
 # QEMU tarballs ship expanded submodule contents; nothing in the series touches

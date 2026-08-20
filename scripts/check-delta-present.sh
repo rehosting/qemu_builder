@@ -6,19 +6,26 @@
 # WHY THIS EXISTS. The boot gate we ship is a minimal kernel+initramfs boot,
 # mirroring linux_builder's nix/boot.nix. That gate has a known hole: it passes
 # even if the entire IGLOO delta is inert, because it never executes a
-# hypercall. Proving a hypercall round-trips needs penguin + a kernel + a
-# rootfs, i.e. a cross-repo integration test, and wiring that into this repo
-# would create a qemu_builder -> penguin -> qemu_builder CI cycle.
+# hypercall. Proving a round-trip needs penguin + a kernel + a rootfs, i.e. a
+# cross-repo integration test, and wiring that in here would create a
+# qemu_builder -> penguin -> qemu_builder CI cycle.
 #
-# This is the cheap middle: it cannot prove a hypercall WORKS, but it does prove
-# every patch that should contribute code to the binary actually did. A patch
-# that silently stopped applying to a hunk, or a target whose translate hook was
-# dropped, fails here rather than being discovered in a rehost weeks later.
+# This is the cheap middle: it cannot prove a hypercall WORKS, but it proves
+# every patch that should contribute code to a given library actually did.
+#
+# TWO GUEST-ENTRY PATHS, and the check must know the difference. Twelve targets
+# reach Penguin through a TCG helper (helper_penguin_guest_hypercall, one patch
+# per arch). x86 does NOT: it has no convenient spare instruction, so the guest
+# writes to I/O port 0x88 and patch 0008 registers a MemoryRegion for it. There
+# is therefore no TCG helper in the x86 libraries by design -- asserting one
+# universally is a false positive, which is exactly what happened before the
+# full 14-arch build ran. For x86 we check the MemoryRegion's name literal
+# instead, which is what proves 0008 landed.
 set -euo pipefail
 
 OUT="${1:?usage: check-delta-present.sh <penguin-qemu-out-dir>}"
 
-# Symbols the core + callbacks patches must contribute to every system library.
+# The core + callbacks patches must contribute these to EVERY system library.
 CORE_SYMS=(
     penguin_handle_guest_hypercall
     penguin_guest_hypercall_registered
@@ -27,9 +34,10 @@ CORE_SYMS=(
     penguin_handle_qmp
     penguin_invoke_reset_request_callback
 )
-# The per-arch TCG hypercall entry. Every TCG system library must define this;
-# its absence means that target's hypercall-entry patch contributed nothing.
-ARCH_SYM=helper_penguin_guest_hypercall
+TCG_SYM=helper_penguin_guest_hypercall   # every target EXCEPT x86
+IOPORT_STR=penguin-hypercall             # x86 only: the port-0x88 MemoryRegion name
+
+is_x86() { case "$1" in x86_64|intel64) return 0 ;; *) return 1 ;; esac; }
 
 shopt -s nullglob
 libs=("$OUT"/lib/libqemu-system-*.so)
@@ -38,15 +46,26 @@ libs=("$OUT"/lib/libqemu-system-*.so)
 rc=0
 for lib in "${libs[@]}"; do
     name=$(basename "$lib")
+    arch=${name#libqemu-system-}; arch=${arch%.so}
     syms=$(nm -D --defined-only "$lib" 2>/dev/null | awk '{print $NF}')
     missing=()
-    for s in "${CORE_SYMS[@]}" "$ARCH_SYM"; do
+
+    for s in "${CORE_SYMS[@]}"; do
         grep -qx "$s" <<<"$syms" || missing+=("$s")
     done
-    if [ ${#missing[@]} -eq 0 ]; then
-        echo "  ok    $name ($(grep -ci penguin <<<"$syms") penguin symbols)"
+
+    if is_x86 "$arch"; then
+        grep -q "$IOPORT_STR" <(strings "$lib") || missing+=("<string:$IOPORT_STR>")
+        path="ioport"
     else
-        echo "  FAIL  $name missing: ${missing[*]}" >&2
+        grep -qx "$TCG_SYM" <<<"$syms" || missing+=("$TCG_SYM")
+        path="tcg-helper"
+    fi
+
+    if [ ${#missing[@]} -eq 0 ]; then
+        echo "  ok    $name [$path] ($(grep -ci penguin <<<"$syms") penguin symbols)"
+    else
+        echo "  FAIL  $name [$path] missing: ${missing[*]}" >&2
         rc=1
     fi
 done

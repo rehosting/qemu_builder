@@ -14,11 +14,12 @@ WORKDIR="${3:?}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PATCHES="$REPO_ROOT/patches"
+# shellcheck source=scripts/lib-extract.sh
+. "$REPO_ROOT/scripts/lib-extract.sh"
 TAG=$(python3 -c "import json;print(json.load(open('$REPO_ROOT/base.json'))['$VERSION']['tag'])")
 
 [ -e "$WORKDIR" ] && { echo "refusing to overwrite existing $WORKDIR" >&2; exit 1; }
-mkdir -p "$WORKDIR"
-tar xf "$TARBALL" -C "$WORKDIR" --strip-components=1
+extract_tarball "$TARBALL" "$WORKDIR"
 cd "$WORKDIR"
 git init -q .
 git add -A
