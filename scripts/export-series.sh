@@ -26,7 +26,13 @@ if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --q
 fi
 
 STAGE=$(mktemp -d); trap 'rm -rf "$STAGE"' EXIT
-git -C "$WORKDIR" format-patch --no-signature -o "$STAGE" "base-${TAG}..HEAD" >/dev/null
+# Determinism matters: the series is committed, so an export with no code
+# change must produce no diff. --no-numbered drops the "nn/NN" counter (which
+# would otherwise shift when the VENDORED commit is filtered out below),
+# --zero-commit blanks the ephemeral dev-tree SHA, and --full-index pins blob
+# hashes that git would otherwise abbreviate to a repo-size-dependent length.
+git -C "$WORKDIR" format-patch --no-signature --no-numbered --zero-commit \
+    --full-index -o "$STAGE" "base-${TAG}..HEAD" >/dev/null
 
 rm -f "$PATCHES/$VERSION"/*.patch
 : > "$PATCHES/$VERSION/series"
