@@ -1,0 +1,60 @@
+{
+  "description": "The feature set the released penguin-qemu artifact is built with. Mirrors rehosting/qemu build.sh's COMMON_CONFIGURE_ARGS as of origin/main 2026-08-19.",
+  "configureArgs": [
+    "--disable-docs",
+    "--enable-modules",
+    "--extra-cflags=-fPIC",
+    "--disable-xen",
+    "--disable-opengl",
+    "--disable-spice",
+    "--disable-gtk",
+    "--disable-sdl",
+    "--disable-vnc",
+    "--enable-virtfs",
+    "--disable-vhost-net",
+    "--enable-vhost-user",
+    "--disable-vhost-vdpa",
+    "--disable-vhost-kernel",
+    "--disable-capstone",
+    "--disable-libiscsi",
+    "--disable-libnfs",
+    "--disable-libusb",
+    "--disable-usb-redir",
+    "--disable-lzo",
+    "--disable-snappy",
+    "--disable-bzip2",
+    "--disable-rdma",
+    "--disable-curl",
+    "--disable-linux-aio"
+  ],
+  "systemArches": [
+    "armel", "aarch64", "mipsel", "mipseb", "mips64el", "mips64eb",
+    "powerpc", "powerpc64", "powerpc64el", "powerpc64le",
+    "riscv64", "loongarch64", "intel64", "x86_64"
+  ],
+  "archToTarget": {
+    "intel64": "x86_64-softmmu",
+    "x86_64": "x86_64-softmmu",
+    "armel": "arm-softmmu",
+    "arm": "arm-softmmu",
+    "aarch64": "aarch64-softmmu",
+    "mipsel": "mipsel-softmmu",
+    "mipseb": "mips-softmmu",
+    "mips": "mips-softmmu",
+    "mips64el": "mips64el-softmmu",
+    "mips64eb": "mips64-softmmu",
+    "mips64": "mips64-softmmu",
+    "powerpc": "ppc-softmmu",
+    "ppc": "ppc-softmmu",
+    "powerpc64": "ppc64-softmmu",
+    "powerpc64le": "ppc64-softmmu",
+    "powerpc64el": "ppc64-softmmu",
+    "ppc64": "ppc64-softmmu",
+    "riscv64": "riscv64-softmmu",
+    "loongarch64": "loongarch64-softmmu"
+  },
+  "kvmTargetByHost": {
+    "x86_64": "x86_64-softmmu",
+    "aarch64": "aarch64-softmmu"
+  }
+}

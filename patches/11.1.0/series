@@ -1,0 +1,12 @@
+11.1.0/0001-penguin-core-callbacks-and-build-wiring.patch
+11.1.0/0002-build-emit-shared-libraries-for-the-Penguin-embeddin.patch
+11.1.0/0003-target-mips-route-guest-hypercalls-into-Penguin.patch
+11.1.0/0004-target-arm-route-guest-hypercalls-into-Penguin.patch
+11.1.0/0005-target-ppc-route-guest-hypercalls-into-Penguin.patch
+11.1.0/0006-target-riscv-route-guest-hypercalls-into-Penguin.patch
+11.1.0/0007-target-loongarch-route-guest-hypercalls-into-Penguin.patch
+11.1.0/0008-target-i386-hw-i386-route-guest-hypercalls-through-a.patch
+11.1.0/0009-kvm-expose-hypercall-and-port-I-O-exits-to-Penguin.patch
+11.1.0/0010-penguin-snapshot-ABI-and-a-migratable-vhost-user-vso.patch
+11.1.0/0011-penguin-reset-request-and-QMP-command-callbacks.patch
+11.1.0/0012-hw-mips-malta-enlarge-the-prom-env-slot-so-the-cmdli.patch
