@@ -75,7 +75,11 @@ jobs:
         run: |
           set -eux
           nix build -L .#penguin-qemu --out-link built
-          ./scripts/check-delta-present.sh built
+          # Through the devShell: this needs nm and strings, and the Arc pods
+          # have no binutils. Before this it exited 127 and the step read as
+          # "the delta is missing", which is the worst possible way to report
+          # a missing tool.
+          nix develop -c ./scripts/check-delta-present.sh built
 
       # configs/default.json's --enable-* group is a set of HARD enables, so a
       # missing library is a configure failure. The subtler drift this catches:

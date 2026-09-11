@@ -30,6 +30,20 @@ set -euo pipefail
 
 OUT="${1:?usage: check-delta-present.sh <penguin-qemu-out-dir>}"
 
+# nm and strings come from binutils, which the Arc CI pods do not ship. Without
+# this the script dies with a bare exit 127 and the step reads as "the delta is
+# missing from the libraries" -- which is the most alarming possible way to
+# report "a tool is not installed". Run it under `nix develop`, where flake.nix
+# puts binutils on PATH from this flake's pinned nixpkgs.
+for tool in nm strings; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "FAIL: '$tool' not on PATH (binutils). This checks symbols in ELF" >&2
+        echo "      libraries and cannot run without it. Try:" >&2
+        echo "        nix develop -c ./scripts/check-delta-present.sh $OUT" >&2
+        exit 1
+    }
+done
+
 # The core + callbacks patches must contribute these to EVERY system library.
 CORE_SYMS=(
     penguin_handle_guest_hypercall

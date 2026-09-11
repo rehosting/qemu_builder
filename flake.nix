@@ -108,11 +108,17 @@
           touch $out
         '';
 
+        # scripts/check-delta-present.sh needs nm and strings; the CI pods have
+        # no binutils, so it ran as exit 127 there and reported a tool being
+        # absent as the IGLOO delta being absent. build.yml runs it through
+        # this shell, so the tools come from the same pinned nixpkgs as
+        # everything else rather than from whatever the runner happens to have.
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             git
             python3
             jq
+            binutils
           ];
         };
       }
