@@ -185,6 +185,8 @@ bool fastsnap_devices_is_restoring(void);
  * 2 release. Duration is measured in C because the operations are tens of
  * microseconds and a pyplugin round trip is hundreds.
  */
+void penguin_fastsnap_set_denylist(const char *csv);
+const char *penguin_fastsnap_section_names(void);
 void penguin_fastsnap_schedule(int op);
 uint64_t penguin_fastsnap_seq(void);
 int penguin_fastsnap_last_rc(void);

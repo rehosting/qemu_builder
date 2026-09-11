@@ -19,6 +19,8 @@
 #define PENGUIN_FASTSNAP_RESTORE 1
 #define PENGUIN_FASTSNAP_RELEASE 2
 
+void penguin_fastsnap_set_denylist(const char *csv);
+const char *penguin_fastsnap_section_names(void);
 void penguin_fastsnap_schedule(int op);
 uint64_t penguin_fastsnap_seq(void);
 int penguin_fastsnap_last_rc(void);

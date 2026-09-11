@@ -52,6 +52,28 @@
  * blocks would need an id-keyed table, and nothing asks for that yet.
  */
 static DeviceSaveState *fastsnap_slot;
+
+/*
+ * Sections to leave OUT of the block, NULL-terminated, owned here.
+ *
+ * This is not a tuning knob, it is a correctness requirement, and only a real
+ * firmware target shows why. A virtio device's state is split in two: the
+ * device model holds last_avail_idx/used_idx, and the vring itself lives in
+ * GUEST RAM. A device-only restore puts back the first half and leaves the
+ * second at whatever the guest has since made of it, and virtio_load() is
+ * strict enough to notice:
+ *
+ *     VQ 1 size 0x100 < last_avail_idx 0x9 - used_idx 0x11
+ *     error while loading state for instance 0x0 of device
+ *     '0000:00:01.0/virtio-net': Failed to load element of type virtio
+ *
+ * Measured on a booted firmware image; a synthetic -M virt machine with no
+ * virtio-net never reaches it. Any device whose state is co-located with guest
+ * RAM has the same problem, so the fix is not to make virtio tolerant -- it is
+ * to keep those devices out of a block that does not carry the RAM they refer
+ * to. That is the announced trade: the fast path gives up the network backend.
+ */
+static char **fastsnap_denylist;
 static int64_t fastsnap_last_us;
 static uint64_t fastsnap_seq;
 static int fastsnap_last_rc = -1;
@@ -75,7 +97,12 @@ static int fastsnap_do(FastsnapOp op)
             fastsnap_slot = NULL;
         }
         t0 = g_get_monotonic_time();
-        fastsnap_slot = device_save_all();
+        if (fastsnap_denylist) {
+            fastsnap_slot = device_save_kind(DEVICE_SNAPSHOT_DENYLIST,
+                                             fastsnap_denylist);
+        } else {
+            fastsnap_slot = device_save_all();
+        }
         fastsnap_last_us = g_get_monotonic_time() - t0;
         return 0;
 
@@ -127,6 +154,44 @@ static void fastsnap_bh(void *opaque)
  * Completion is observable through penguin_fastsnap_seq(); the result of the
  * operation through penguin_fastsnap_last_rc() and the accessors below.
  */
+/*
+ * Comma-separated section ids to exclude from the block, or NULL/"" to clear.
+ * Takes effect on the next take. Call before scheduling one; it touches only
+ * this module's own state, so it does not need the main loop.
+ */
+void __attribute__((visibility("default")))
+penguin_fastsnap_set_denylist(const char *csv)
+{
+    g_strfreev(fastsnap_denylist);
+    fastsnap_denylist = NULL;
+
+    if (csv && *csv) {
+        fastsnap_denylist = g_strsplit(csv, ",", -1);
+        /* g_strsplit keeps surrounding whitespace; device-save.c compares with
+         * strcmp, so trim here rather than silently never matching. */
+        for (char **p = fastsnap_denylist; *p; p++) {
+            g_strstrip(*p);
+        }
+    }
+}
+
+/*
+ * Newline-separated ids of every section a block would cover, so a caller can
+ * see what is actually on this machine before choosing a denylist. Valid until
+ * the next call.
+ */
+__attribute__((visibility("default")))
+const char *penguin_fastsnap_section_names(void)
+{
+    static char *joined;
+    char **list = device_list_all();
+
+    g_free(joined);
+    joined = g_strjoinv("\n", list);
+    g_free(list);
+    return joined;
+}
+
 void __attribute__((visibility("default")))
 penguin_fastsnap_schedule(int op)
 {
