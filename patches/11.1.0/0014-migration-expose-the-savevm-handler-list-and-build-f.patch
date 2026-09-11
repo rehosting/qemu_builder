@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: igloo <nix@local>
+Date: Fri, 11 Sep 2026 00:50:38 -0400
+Subject: [PATCH] migration: expose the savevm handler list, and build fastsnap
+
+Penguin's fastsnap saves every non-iterative savevm section into one heap
+block and restores from it, without a migration stream or a qcow2 -- the
+device half of a fast in-process snapshot for fuzzing. To do that it has to
+walk savevm_state.handlers, which is private to migration/savevm.c.
+
+qemu-libafl-bridge, which this is adopted from, gets at it by hoisting
+SaveStateEntry and SaveState into migration/savevm.h and deleting them from
+the .c. That is a duplicated struct definition which must track upstream
+byte-for-byte or corrupt memory silently, and it is the worst thing a series
+rebased across upstream releases could carry: it applies cleanly and is wrong.
+
+Two accessors instead. SaveStateEntry stays an incomplete type outside
+savevm.c -- callers get a handle they can hand back, never a layout they can
+go stale against:
+
+  qemu_savevm_foreach_handler()  walks the list, reporting each section's
+                                 idstr and whether it is an iterative handler
+  qemu_savevm_save_one()         writes one section, header and footer, as
+                                 qemu_savevm_state_non_iterable() would
+
+Purely additive: nothing is deleted, nothing stops being static, and the
+reported "iterative" predicate is computed inside savevm.c where the struct
+lives. The 9.1.1 field this replaces was se->is_ram, whose name was already
+misleading -- it was set for any handler with a save_setup op, and the field
+was removed in 11.x.
+
+Also adds subdir('fastsnap') to the build, for the sources that use this.
+They live in src/ and are copied in, so they are not part of this series.
+---
+ meson.build        |  1 +
+ migration/savevm.c | 20 ++++++++++++++++++++
+ migration/savevm.h | 43 +++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 64 insertions(+)
+
+diff --git a/meson.build b/meson.build
+index 471f3f9964bb9129ed344d0615c9b87e858d5ca9..fdfa27fc1d52e1d09116126675143f65bcfd665a 100644
+--- a/meson.build
++++ b/meson.build
+@@ -3747,6 +3747,7 @@ subdir('accel')
+ subdir('backends')
+ subdir('configs/targets')
+ subdir('disas')
++subdir('fastsnap')
+ subdir('migration')
+ subdir('monitor')
+ subdir('net')
+diff --git a/migration/savevm.c b/migration/savevm.c
+index d3b7ecfd05b0fb6b5d3692154fe952e24816471d..699674ee23e90b22bcfb47581726412fee21d57a 100644
+--- a/migration/savevm.c
++++ b/migration/savevm.c
+@@ -1099,6 +1099,26 @@ static int vmstate_save(QEMUFile *f, SaveStateEntry *se, JSONWriter *vmdesc,
+     return 0;
+ }
+ 
++int qemu_savevm_foreach_handler(SaveStateHandlerFn fn, void *opaque)
++{
++    SaveStateEntry *se;
++    int ret;
++
++    QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
++        ret = fn(se, se->idstr, se->ops && se->ops->save_setup, opaque);
++        if (ret) {
++            return ret;
++        }
++    }
++
++    return 0;
++}
++
++int qemu_savevm_save_one(QEMUFile *f, SaveStateEntry *se, Error **errp)
++{
++    return vmstate_save(f, se, NULL, errp);
++}
++
+ void qemu_savevm_state_end(QEMUFile *f)
+ {
+     qemu_put_byte(f, QEMU_VM_EOF);
+diff --git a/migration/savevm.h b/migration/savevm.h
+index f7dcdd7d1b6b7b5397eb1b6aab5cb5816a92f1a8..54ab1c23aff3f5cf2943dd67c0892aaa7f547311 100644
+--- a/migration/savevm.h
++++ b/migration/savevm.h
+@@ -73,6 +73,49 @@ void qemu_loadvm_state_cleanup(MigrationIncomingState *mis);
+ int qemu_loadvm_state_main(QEMUFile *f, MigrationIncomingState *mis,
+                            Error **errp);
+ int qemu_load_device_state(QEMUFile *f, Error **errp);
++
++/*
++ * Read-only access to the savevm handler list, for in-tree code that needs to
++ * snapshot device state on its own terms -- Penguin's fastsnap saves every
++ * non-iterative section into one heap block and restores from it, without
++ * going near a migration stream or a qcow2.
++ *
++ * SaveStateEntry stays an incomplete type here on purpose. Callers get a
++ * handle they can pass back, never a layout they can go stale against.
++ */
++typedef struct SaveStateEntry SaveStateEntry;
++
++/**
++ * SaveStateHandlerFn:
++ * @se: opaque handle to the handler, for qemu_savevm_save_one()
++ * @idstr: the section id, e.g. "cpu", "timer", "ram"
++ * @iterative: true if this handler has a save_setup op, i.e. it is a live /
++ *   iterative handler (ram, dirty-bitmap, slirp, spapr/htab, vfio) whose state
++ *   is only meaningful as part of a migration stream
++ * @opaque: caller data
++ *
++ * Return non-zero to stop the walk; the value is returned to the caller.
++ */
++typedef int (*SaveStateHandlerFn)(SaveStateEntry *se, const char *idstr,
++                                  bool iterative, void *opaque);
++
++/**
++ * qemu_savevm_foreach_handler:
++ *
++ * Invoke @fn once per registered savevm handler, in registration order.
++ * Requires the BQL. Returns 0, or the first non-zero value @fn returned.
++ */
++int qemu_savevm_foreach_handler(SaveStateHandlerFn fn, void *opaque);
++
++/**
++ * qemu_savevm_save_one:
++ *
++ * Write one handler's complete section -- header, payload and footer -- into
++ * @f, exactly as qemu_savevm_state_non_iterable() would. @se must have come
++ * from qemu_savevm_foreach_handler(). Returns 0 on success, negative on error
++ * with @errp set.
++ */
++int qemu_savevm_save_one(QEMUFile *f, SaveStateEntry *se, Error **errp);
+ int qemu_loadvm_approve_switchover(const char *approver);
+ bool qemu_savevm_state_non_iterable(QEMUFile *f, Error **errp);
+ int qemu_savevm_state_non_iterable_early(QEMUFile *f,
