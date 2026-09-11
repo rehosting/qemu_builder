@@ -13,6 +13,11 @@
 # This is the cheap middle: it cannot prove a hypercall WORKS, but it proves
 # every patch that should contribute code to a given library actually did.
 #
+# fastsnap is the one part of the delta that DOES have a behavioural gate:
+# `nix flake check` builds a single aarch64 target and runs its round-trip
+# selftest. This still covers it statically, because that check builds one
+# target and this covers all fourteen.
+#
 # TWO GUEST-ENTRY PATHS, and the check must know the difference. Twelve targets
 # reach Penguin through a TCG helper (helper_penguin_guest_hypercall, one patch
 # per arch). x86 does NOT: it has no convenient spare instruction, so the guest
@@ -25,6 +30,20 @@ set -euo pipefail
 
 OUT="${1:?usage: check-delta-present.sh <penguin-qemu-out-dir>}"
 
+# nm and strings come from binutils, which the Arc CI pods do not ship. Without
+# this the script dies with a bare exit 127 and the step reads as "the delta is
+# missing from the libraries" -- which is the most alarming possible way to
+# report "a tool is not installed". Run it under `nix develop`, where flake.nix
+# puts binutils on PATH from this flake's pinned nixpkgs.
+for tool in nm strings; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "FAIL: '$tool' not on PATH (binutils). This checks symbols in ELF" >&2
+        echo "      libraries and cannot run without it. Try:" >&2
+        echo "        nix develop -c ./scripts/check-delta-present.sh $OUT" >&2
+        exit 1
+    }
+done
+
 # The core + callbacks patches must contribute these to EVERY system library.
 CORE_SYMS=(
     penguin_handle_guest_hypercall
@@ -36,6 +55,34 @@ CORE_SYMS=(
 )
 TCG_SYM=helper_penguin_guest_hypercall   # every target EXCEPT x86
 IOPORT_STR=penguin-hypercall             # x86 only: the port-0x88 MemoryRegion name
+
+# The fastsnap patch + src/fastsnap/ must contribute these to EVERY system
+# library too. They are a separate group from CORE_SYMS only so a failure says
+# which half of the delta went missing.
+FASTSNAP_SYMS=(
+    device_save_all
+    device_save_kind
+    device_restore_all
+    device_free_all
+    device_list_all
+    fastsnap_devices_is_restoring
+)
+
+# The Penguin-facing ABI. This is the half penguin actually dlsym()s, via the
+# cdef penguin-cffi-gen.py emits, so a build that dropped it would pass every
+# other check here and then fail at runtime on the first fastsnap call. Kept
+# as its own group so a failure names the ABI rather than the internals.
+PENGUIN_ABI_SYMS=(
+    penguin_fastsnap_schedule
+    penguin_fastsnap_seq
+    penguin_fastsnap_last_rc
+    penguin_fastsnap_last_us
+    penguin_fastsnap_last_digest
+    penguin_fastsnap_block_size
+    penguin_fastsnap_section_count
+    penguin_fastsnap_set_denylist
+    penguin_fastsnap_section_names
+)
 
 is_x86() { case "$1" in x86_64|intel64) return 0 ;; *) return 1 ;; esac; }
 
@@ -50,7 +97,7 @@ for lib in "${libs[@]}"; do
     syms=$(nm -D --defined-only "$lib" 2>/dev/null | awk '{print $NF}')
     missing=()
 
-    for s in "${CORE_SYMS[@]}"; do
+    for s in "${CORE_SYMS[@]}" "${FASTSNAP_SYMS[@]}" "${PENGUIN_ABI_SYMS[@]}"; do
         grep -qx "$s" <<<"$syms" || missing+=("$s")
     done
 
