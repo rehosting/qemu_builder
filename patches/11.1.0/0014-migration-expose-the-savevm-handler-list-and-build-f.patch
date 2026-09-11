@@ -31,6 +31,9 @@ was removed in 11.x.
 
 Also adds subdir('fastsnap') to the build, for the sources that use this.
 They live in src/ and are copied in, so they are not part of this series.
+
+License: GPL-2.0-or-later
+Origin: authored-by-igloo
 ---
  meson.build        |  1 +
  migration/savevm.c | 20 ++++++++++++++++++++

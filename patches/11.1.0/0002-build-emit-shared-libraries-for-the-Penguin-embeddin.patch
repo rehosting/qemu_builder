@@ -13,6 +13,9 @@ Requires b_staticpic=true, since the default static-PIC-free build cannot be
 relinked into a shared object.
 
 Folds: 67bfb34d25, 797f446cf8 (partial)
+
+License: inherit
+Origin: authored-by-igloo
 ---
  meson.build | 34 +++++++++++++++++++++++++++++++++-
  1 file changed, 33 insertions(+), 1 deletion(-)

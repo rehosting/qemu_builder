@@ -25,6 +25,23 @@ scripts/export-series.sh    dev git tree -> the committed series
 scripts/probe-versions.sh   portability report across upstream refs
 ```
 
+## Licensing follows the patch, because QEMU is not one licence
+
+The 34 upstream files this series touches are 11 `GPL-2.0-or-later`, 10
+`LGPL-2.1-or-later`, 5 **`MIT`**, 2 **`GPL-2.0-only`** and 6 with no statement
+at all. A patch is a derivative of the files it edits, not of the tree's
+aggregate, so a repo-level "the patches are GPL-2.0" would be wrong about three
+patches, needlessly restrictive about four, and would hide the single patch
+(`0010`) that touches a GPL-2.0-**only** file.
+
+So every patch declares its own, in `License:` / `Origin:` trailers that live in
+the commit message and therefore travel inside the patch.
+`scripts/check-patch-licensing.py` recomputes the answer from the files and
+fails if the declaration disagrees; it runs in `series.yml`. The scaffolding
+(`build.sh`, the flake, `nix/`, `scripts/`, CI) is MIT and derivative of
+nothing. `LICENSING.md` has the detail; `src/fastsnap/PROVENANCE.md` covers the
+one directory of adopted third-party code.
+
 ## The invariant that makes this work
 
 **No patch in the series ever references a file we created.**

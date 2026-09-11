@@ -7,6 +7,9 @@ Two more host-visible callbacks: one fired when the guest requests a reset,
 one for dispatching a QMP command from Penguin.
 
 Folds: ad36639bde, b853deff4c
+
+License: LGPL-2.1-or-later
+Origin: authored-by-igloo
 ---
  qapi/qmp-dispatch.c | 47 +++++++++++++++++++++++++++++++++++++++++++++
  system/runstate.c   |  3 +++
