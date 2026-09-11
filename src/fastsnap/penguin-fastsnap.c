@@ -82,7 +82,11 @@ typedef enum {
     FASTSNAP_OP_TAKE = PENGUIN_FASTSNAP_TAKE,
     FASTSNAP_OP_RESTORE = PENGUIN_FASTSNAP_RESTORE,
     FASTSNAP_OP_RELEASE = PENGUIN_FASTSNAP_RELEASE,
+    FASTSNAP_OP_PROBE = PENGUIN_FASTSNAP_PROBE,
 } FastsnapOp;
+
+static uint64_t fastsnap_last_digest;
+static uint64_t fastsnap_probe_digest(void);
 
 /* BQL held, vCPUs stopped by the caller. */
 static int fastsnap_do(FastsnapOp op)
@@ -115,6 +119,12 @@ static int fastsnap_do(FastsnapOp op)
         device_restore_all(fastsnap_slot);
         fastsnap_last_us = g_get_monotonic_time() - t0;
         return 0;
+
+    case FASTSNAP_OP_PROBE:
+        t0 = g_get_monotonic_time();
+        fastsnap_last_digest = fastsnap_probe_digest();
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        return fastsnap_last_digest ? 0 : -1;
 
     case FASTSNAP_OP_RELEASE:
         if (fastsnap_slot) {
@@ -154,6 +164,50 @@ static void fastsnap_bh(void *opaque)
  * Completion is observable through penguin_fastsnap_seq(); the result of the
  * operation through penguin_fastsnap_last_rc() and the accessors below.
  */
+/*
+ * Hash the device state AS IT IS RIGHT NOW, without touching the saved slot.
+ *
+ * THE POSITIVE CONTROL, and the reason it has to exist. On a synthetic machine
+ * the selftest perturbs a known PL011 register and checks the block changed. On
+ * real firmware there is no such register to reach for, so the only way to know
+ * a restore did anything is to watch the device state itself move:
+ *
+ *     A = probe()          take a block
+ *     ... guest runs ...
+ *     B = probe()          assert B != A, or the probe is blind
+ *     restore(block)
+ *     C = probe()          assert C == A  AND  C != B
+ *
+ * Without this a device_restore_all() that silently restored nothing looks
+ * exactly like a correct one: same duration, same absence of a re-translation
+ * cliff, same verdict. It is the difference between measuring a mechanism and
+ * measuring its absence.
+ *
+ * Returns a 64-bit hash of the block, or 0 if one cannot be taken. Honours the
+ * denylist, so it compares like with like. BQL + stopped vCPUs, so it runs from
+ * the same bottom half as the rest.
+ */
+static uint64_t fastsnap_probe_digest(void)
+{
+    DeviceSaveState *tmp;
+    uint64_t h = 1469598103934665603ULL;      /* FNV-1a 64 */
+    size_t i;
+
+    tmp = fastsnap_denylist
+        ? device_save_kind(DEVICE_SNAPSHOT_DENYLIST, fastsnap_denylist)
+        : device_save_all();
+    if (!tmp) {
+        return 0;
+    }
+    for (i = 0; i < tmp->save_buffer_size; i++) {
+        h ^= tmp->save_buffer[i];
+        h *= 1099511628211ULL;
+    }
+    device_free_all(tmp);
+    g_free(tmp);
+    return h;
+}
+
 /*
  * Comma-separated section ids to exclude from the block, or NULL/"" to clear.
  * Takes effect on the next take. Call before scheduling one; it touches only
@@ -216,6 +270,14 @@ int64_t __attribute__((visibility("default")))
 penguin_fastsnap_last_us(void)
 {
     return fastsnap_last_us;
+}
+
+/* Hash from the last PROBE. Compare across probes; the value itself is not
+ * stable across builds or machines. */
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_last_digest(void)
+{
+    return fastsnap_last_digest;
 }
 
 uint64_t __attribute__((visibility("default")))

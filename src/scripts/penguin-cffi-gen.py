@@ -191,6 +191,7 @@ void penguin_fastsnap_schedule(int op);
 uint64_t penguin_fastsnap_seq(void);
 int penguin_fastsnap_last_rc(void);
 int64_t penguin_fastsnap_last_us(void);
+uint64_t penguin_fastsnap_last_digest(void);
 uint64_t penguin_fastsnap_block_size(void);
 int penguin_fastsnap_section_count(void);
 """
