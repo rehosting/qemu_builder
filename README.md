@@ -320,8 +320,8 @@ so — run `probe-versions.sh` locally against a full clone for the real split.
   `libiscsi`, `libnfs`, `libusb`, `libusbredirparser`, `liblzo2`, `libsnappy`,
   `libbz2`, `libpng16`, `libjpeg`, `librdmacm` + `libibverbs`). VNC is in, with
   262 `vnc_` symbols and the `RFB 003` handshake string.
-- `check-delta-present.sh` passes on all 14 libraries, now including the six
-  fastsnap entry points. It distinguishes the two guest-entry paths: 12 targets
+- `check-delta-present.sh` passes on all 14 libraries **in CI**, now including
+  the six fastsnap entry points. It distinguishes the two guest-entry paths: 12 targets
   carry `helper_penguin_guest_hypercall` (22 penguin symbols each), while x86
   carries the port-0x88 `penguin-hypercall` MemoryRegion literal instead
   (20 symbols) — x86 has no TCG helper by design. Verified to fail on a negative
@@ -340,20 +340,30 @@ so — run `probe-versions.sh` locally against a full clone for the real split.
   probed**, head to head, across three upstream refs — see *Portability*. The
   hoist was rejected on evidence, not on preference.
 - **The fastsnap device-state round trip passes on 11.1.0**, under
-  `nix flake check`, with its positive control firing; and the gate was
-  verified to fail when the restore is neutered.
+  `nix flake check` **and on the CI runner**, with its positive control firing;
+  and the gate was verified to fail when the restore is neutered.
+- **`build.yml` is green end to end**, on PR #2 — the first pull request this
+  repo has had, and so the first time that workflow has ever run. All eleven
+  steps pass, including `check-delta-present.sh`, the config contract and the
+  per-arch library check, none of which had executed in CI before. The first
+  attempt failed at exit 127: `check-delta-present.sh` greps `nm` and
+  `strings`, and the Arc pods ship no binutils, so that check had never
+  actually worked outside a developer machine. It now runs through
+  `nix develop`, and preflights its tools rather than dying as a bare 127 under
+  a step named "IGLOO delta is present in the built libraries".
+- **Per-patch licensing and patch sets pass in CI**, with a negative control
+  for each distinct failure: a wrong `License:`, a missing trailer, interleaved
+  sets, an unknown set name, an orphaned set file, an adopted set with no
+  licence, and a `srcPath` that does not exist.
 - `configs/default.json` reproduces the same 11 targets and 11 libraries as the
   hardcoded arrays it replaces.
 - The tarball/tag and subproject claims above.
 
 **Not done yet:**
 
-- **`build.yml` and `publish.yml` have never executed.** The canary has now run
-  weekly and is green. `build.yml` is `pull_request`-only and this repo has
-  never had a pull request — every change so far went in by push — so the
-  expensive half of CI is itself untested, including the full-matrix build
-  reported as passing below. The first PR against this repo is what turns it
-  on.
+- **`publish.yml` has never executed**, deliberately — it is
+  `workflow_dispatch`-only while `rehosting/qemu` is still the live publisher.
+  The canary runs weekly and is green.
 - **The minimal-boot gate is not written.** `check-delta-present.sh` is the
   cheaper stand-in and closes part of the same gap; see its header for why the
   hypercall-round-trip version was declined.
