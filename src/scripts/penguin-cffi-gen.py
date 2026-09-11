@@ -135,6 +135,39 @@ void penguin_schedule_snapshot(const char *name, bool load);
 void set_penguin_reset_request_callback(penguin_reset_request_cb_t cb, void *opaque);
 void set_penguin_qmp_callback(penguin_qmp_cb_t cb, void *opaque);
 bool penguin_handle_qmp(const char *command, const char *args, char **result);
+
+/*
+ * fastsnap: device state in a block. Saves every non-iterative savevm section
+ * into one heap buffer and restores from it, with no migration stream and no
+ * qcow2 -- the device half of a fast in-process snapshot restore.
+ *
+ * device_save_kind()/device_restore_all() need the BQL held AND the vCPUs
+ * stopped: they walk live device state. From a Penguin pyplugin that means
+ * scheduling onto the main loop, the same constraint penguin_load_snapshot()
+ * has.
+ *
+ * device_list_all() returns a NULL-terminated array whose strings point into
+ * QEMU's own handler list -- do not free the strings, and do not hold them
+ * across a device hot-unplug.
+ */
+typedef struct DeviceSaveState {{
+    uint8_t kind;
+    uint8_t *save_buffer;
+    size_t save_buffer_size;
+}} DeviceSaveState;
+
+typedef enum DeviceSnapshotKind {{
+    DEVICE_SNAPSHOT_ALL,
+    DEVICE_SNAPSHOT_ALLOWLIST,
+    DEVICE_SNAPSHOT_DENYLIST
+}} DeviceSnapshotKind;
+
+DeviceSaveState *device_save_all(void);
+DeviceSaveState *device_save_kind(DeviceSnapshotKind kind, char **names);
+void device_restore_all(DeviceSaveState *dss);
+void device_free_all(DeviceSaveState *dss);
+char **device_list_all(void);
+bool fastsnap_devices_is_restoring(void);
 """
 
 
