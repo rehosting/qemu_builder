@@ -168,6 +168,29 @@ void device_restore_all(DeviceSaveState *dss);
 void device_free_all(DeviceSaveState *dss);
 char **device_list_all(void);
 bool fastsnap_devices_is_restoring(void);
+
+/*
+ * The scheduled form, and the one Penguin should actually use. The calls above
+ * need the BQL held AND the vCPUs stopped; a pyplugin callback runs on a vCPU
+ * thread inside a hypercall and has neither, so this defers the work to the
+ * main loop the way penguin_schedule_snapshot() does.
+ *
+ * It deliberately does NOT go through vm_stop(RUN_STATE_RESTORE_VM), which is
+ * what penguin_load_snapshot() uses and what makes accel/tcg flush every
+ * translation block. A device-only restore changes no RAM, so no translated
+ * block can go stale and the flush is unnecessary rather than merely costly.
+ *
+ * Fire-and-forget. Poll penguin_fastsnap_seq() for completion, then read
+ * penguin_fastsnap_last_rc() and the accessors. op: 0 take, 1 restore,
+ * 2 release. Duration is measured in C because the operations are tens of
+ * microseconds and a pyplugin round trip is hundreds.
+ */
+void penguin_fastsnap_schedule(int op);
+uint64_t penguin_fastsnap_seq(void);
+int penguin_fastsnap_last_rc(void);
+int64_t penguin_fastsnap_last_us(void);
+uint64_t penguin_fastsnap_block_size(void);
+int penguin_fastsnap_section_count(void);
 """
 
 

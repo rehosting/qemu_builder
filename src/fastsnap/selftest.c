@@ -27,6 +27,7 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
+#include "qemu/main-loop.h"
 #include "system/runstate.h"
 #include "system/system.h"
 #include "system/address-spaces.h"
@@ -34,6 +35,7 @@
 #include "hw/core/boards.h"
 
 #include "fastsnap/device-save.h"
+#include "fastsnap/penguin-fastsnap.h"
 
 /* hw/arm/virt.c memmap: VIRT_UART0. PL011 UARTIMSC is at +0x38, and
  * int_enabled is a VMSTATE_UINT32 in vmstate_pl011, so a write here must show
@@ -46,6 +48,109 @@ static bool blocks_equal(DeviceSaveState *x, DeviceSaveState *y)
 {
     return x->save_buffer_size == y->save_buffer_size &&
            memcmp(x->save_buffer, y->save_buffer, x->save_buffer_size) == 0;
+}
+
+/*
+ * Phase 2: the scheduled path, and the property the whole design rests on.
+ *
+ * penguin_load_snapshot() goes through vm_stop(RUN_STATE_RESTORE_VM), and
+ * accel/tcg/tcg-all.c turns that specific runstate into an unconditional
+ * tb_flush -- which on this lane's target cost more than the restore itself,
+ * and lands as post-restore throughput rather than as restore latency, so a
+ * latency benchmark cannot see it.
+ *
+ * A device-only restore changes no RAM, so no translated block can go stale
+ * and the flush is unnecessary rather than merely expensive. That is only true
+ * as long as the restore never enters RUN_STATE_RESTORE_VM, so assert exactly
+ * that, by watching the same transition tcg_vm_change_state() keys on. This
+ * reads no TCG internals: tb_ctx lives in accel/tcg/tb-context.h, which is
+ * accel-private, and reaching into it from here would be the layering
+ * violation this port exists to avoid.
+ */
+static bool saw_restore_vm;
+static bool phase2_done;
+static int phase1_failures;
+static VMChangeStateEntry *running_watch;
+static void fastsnap_on_running(void *opaque, bool running, RunState state);
+
+static void fastsnap_runstate_watch(void *opaque, bool running, RunState state)
+{
+    if (state == RUN_STATE_RESTORE_VM) {
+        saw_restore_vm = true;
+    }
+}
+
+static int fastsnap_await(uint64_t target_seq)
+{
+    /* Pump the main loop until the BH has run. Bounded so a wedge fails rather
+     * than hangs a CI job. */
+    for (int i = 0; i < 100000; i++) {
+        if (penguin_fastsnap_seq() >= target_seq) {
+            return 0;
+        }
+        main_loop_wait(true);
+    }
+    return -1;
+}
+
+static int fastsnap_selftest_scheduled(void)
+{
+    VMChangeStateEntry *watch;
+    uint64_t seq;
+    int failures = 0;
+
+    /*
+     * MUST run with the VM running. vm_stop() on an already-stopped VM returns
+     * without notifying change-state handlers, so at machine-init-done the
+     * watcher below can never fire and the assertion is inert -- it passes even
+     * when a vm_stop(RUN_STATE_RESTORE_VM) is deliberately injected. That is
+     * how this was caught: by its own negative control.
+     */
+    if (!runstate_is_running()) {
+        printf("fastsnap: FAIL - scheduled phase ran with the VM stopped, "
+               "where the no-tb_flush assertion cannot fire at all\n");
+        return 1;
+    }
+
+    watch = qemu_add_vm_change_state_handler(fastsnap_runstate_watch, NULL);
+    saw_restore_vm = false;
+
+    seq = penguin_fastsnap_seq();
+    penguin_fastsnap_schedule(PENGUIN_FASTSNAP_TAKE);
+    if (fastsnap_await(seq + 1) || penguin_fastsnap_last_rc() != 0) {
+        printf("fastsnap: FAIL - scheduled take did not complete\n");
+        failures++;
+    } else {
+        printf("fastsnap: scheduled take %" PRId64 " us, %" PRIu64 " bytes, "
+               "%d sections\n",
+               penguin_fastsnap_last_us(), penguin_fastsnap_block_size(),
+               penguin_fastsnap_section_count());
+    }
+
+    seq = penguin_fastsnap_seq();
+    penguin_fastsnap_schedule(PENGUIN_FASTSNAP_RESTORE);
+    if (fastsnap_await(seq + 1) || penguin_fastsnap_last_rc() != 0) {
+        printf("fastsnap: FAIL - scheduled restore did not complete\n");
+        failures++;
+    } else {
+        printf("fastsnap: scheduled restore %" PRId64 " us\n",
+               penguin_fastsnap_last_us());
+    }
+
+    /* THE assertion. */
+    if (saw_restore_vm) {
+        printf("fastsnap: FAIL - the restore entered RUN_STATE_RESTORE_VM, "
+               "which makes accel/tcg flush every translation block. The "
+               "whole point of a device-only restore is that it does not.\n");
+        failures++;
+    } else {
+        printf("fastsnap: no RUN_STATE_RESTORE_VM transition, so no tb_flush\n");
+    }
+
+    penguin_fastsnap_schedule(PENGUIN_FASTSNAP_RELEASE);
+    fastsnap_await(penguin_fastsnap_seq() + 1);
+    qemu_del_vm_change_state_handler(watch);
+    return failures;
 }
 
 static void fastsnap_selftest_run(Notifier *n, void *opaque)
@@ -133,7 +238,7 @@ static void fastsnap_selftest_run(Notifier *n, void *opaque)
                "perturbation\n");
     }
 
-    printf("fastsnap: SELFTEST %s\n", failures ? "FAILED" : "PASSED");
+    printf("fastsnap: phase 1 %s\n", failures ? "FAILED" : "passed");
 
     g_free(a_copy);
     device_free_all(a);
@@ -144,9 +249,30 @@ static void fastsnap_selftest_run(Notifier *n, void *opaque)
     g_free(c);
 
     fflush(stdout);
+
+    /*
+     * Hand off to phase 2, which needs the VM running. Recorded rather than
+     * exited on, so a phase-1 failure still shows up in the final verdict.
+     */
+    phase1_failures = failures;
+    running_watch = qemu_add_vm_change_state_handler(fastsnap_on_running, NULL);
+}
+
+static void fastsnap_on_running(void *opaque, bool running, RunState state)
+{
+    int failures;
+
+    if (!running || phase2_done) {
+        return;
+    }
+    phase2_done = true;
+
+    failures = phase1_failures + fastsnap_selftest_scheduled();
+    printf("fastsnap: SELFTEST %s\n", failures ? "FAILED" : "PASSED");
+    fflush(stdout);
     /* _exit, not exit: returning through QEMU's atexit teardown from a
-     * machine-init-done notifier segfaults, which would leave a PASS carrying
-     * a core-dump exit status. */
+     * change-state handler segfaults, which would leave a PASS carrying a
+     * core-dump exit status. */
     _exit(failures ? 1 : 0);
 }
 

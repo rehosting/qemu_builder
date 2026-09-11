@@ -96,10 +96,14 @@ stdenv.mkDerivation {
     runHook preCheck
 
     echo ">>> fastsnap device-snapshot round trip"
-    # -S so the machine is constructed and then stopped: the selftest runs from
-    # a machine-init-done notifier and _exit()s, so the guest never executes.
+    # NOT -S. Phase 1 runs at machine-init-done, but phase 2 asserts that the
+    # restore never enters RUN_STATE_RESTORE_VM -- and vm_stop() on an
+    # already-stopped VM returns without notifying change-state handlers, so
+    # under -S that assertion cannot fire and passes even when a
+    # vm_stop(RUN_STATE_RESTORE_VM) is deliberately injected. It was inert
+    # exactly once, and its own negative control is what caught it.
     FASTSNAP_SELFTEST=1 ./qemu-system-aarch64 \
-      -M virt -cpu cortex-a57 -m 128 -display none -S 2>&1 | tee selftest.log
+      -M virt -cpu cortex-a57 -m 128 -display none 2>&1 | tee selftest.log
 
     # tee eats the exit status, so assert on the verdict line. SKIPPED must not
     # pass here: on -M virt the PL011 exists, so a SKIPPED verdict means the
@@ -109,6 +113,12 @@ stdenv.mkDerivation {
     grep -q '^fastsnap: control OK' selftest.log || {
         echo "FAIL: the positive control did not fire, so the verdict above " \
              "is not evidence of anything" >&2; exit 1; }
+    # Phase 2 must have actually run. If the binary reverts to a build where it
+    # does not, the PASSED line alone would not notice.
+    grep -q 'no RUN_STATE_RESTORE_VM transition' selftest.log || {
+        echo "FAIL: the no-tb_flush assertion did not run" >&2; exit 1; }
+    grep -q '^fastsnap: scheduled restore ' selftest.log || {
+        echo "FAIL: the scheduled path did not run" >&2; exit 1; }
 
     echo "PASS: device state round-tripped, and the control proves the "
     echo "      instrument could have seen a difference."

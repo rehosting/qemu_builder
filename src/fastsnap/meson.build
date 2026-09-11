@@ -7,5 +7,6 @@
 system_ss.add(files(
   'channel-buffer-writeback.c',
   'device-save.c',
+  'penguin-fastsnap.c',
   'selftest.c',
 ))

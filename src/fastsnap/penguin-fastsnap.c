@@ -1,0 +1,174 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * Penguin-facing entry points for the device block: a C ABI the CFFI layer can
+ * drive, and the main-loop scheduling that makes it safe to ask for one from a
+ * vCPU thread.
+ *
+ * WHY THIS IS NOT JUST device_save_all() EXPORTED. Two reasons, and the second
+ * is the whole point of the feature.
+ *
+ * 1. Context. the save and restore calls walk live device state, so they
+ *    need the BQL held and the vCPUs stopped. A Penguin pyplugin callback runs
+ *    on a vCPU thread inside a hypercall, which is neither. So the work is
+ *    scheduled onto the main loop, exactly as penguin_schedule_snapshot() does
+ *    for savevm/loadvm.
+ *
+ * 2. NOT vm_stop(). penguin_load_snapshot() calls vm_stop(RUN_STATE_RESTORE_VM),
+ *    and accel/tcg/tcg-all.c turns that specific runstate into an unconditional
+ *    tb_flush__exclusive_or_serial(). Upstream's comment there says why:
+ *
+ *        "loadvm will update the content of RAM, bypassing the usual
+ *         mechanisms that ensure we flush TBs for writes to memory we've
+ *         translated code from, so we must flush all TBs."
+ *
+ *    A device-only restore updates no RAM. No guest instruction bytes change,
+ *    so no translated block can go stale, so the flush is not merely expensive
+ *    here -- it is unnecessary by construction. Measured on this lane's target,
+ *    post-restore re-translation was the LARGER half of a full restore's cost,
+ *    and a restore-latency benchmark cannot see it at all because it lands as
+ *    throughput afterwards rather than as latency during.
+ *
+ *    So this pauses the vCPUs with pause_all_vcpus(), which stops them without
+ *    a runstate transition, and never enters RUN_STATE_RESTORE_VM. If a future
+ *    version of this restores RAM as well, that reasoning expires with it and
+ *    the flush has to come back.
+ *
+ * Timing is taken here rather than in Python: the operations are tens of
+ * microseconds, and a pyplugin round trip is hundreds.
+ */
+#include "qemu/osdep.h"
+#include "qemu/main-loop.h"
+#include "qemu/error-report.h"
+#include "qemu/aio.h"
+#include "system/cpus.h"
+#include "system/runstate.h"
+
+#include "fastsnap/device-save.h"
+#include "fastsnap/penguin-fastsnap.h"
+
+/*
+ * One slot. A fuzzing loop wants take-once, restore-many; multiple concurrent
+ * blocks would need an id-keyed table, and nothing asks for that yet.
+ */
+static DeviceSaveState *fastsnap_slot;
+static int64_t fastsnap_last_us;
+static uint64_t fastsnap_seq;
+static int fastsnap_last_rc = -1;
+
+typedef enum {
+    FASTSNAP_OP_TAKE = PENGUIN_FASTSNAP_TAKE,
+    FASTSNAP_OP_RESTORE = PENGUIN_FASTSNAP_RESTORE,
+    FASTSNAP_OP_RELEASE = PENGUIN_FASTSNAP_RELEASE,
+} FastsnapOp;
+
+/* BQL held, vCPUs stopped by the caller. */
+static int fastsnap_do(FastsnapOp op)
+{
+    int64_t t0;
+
+    switch (op) {
+    case FASTSNAP_OP_TAKE:
+        if (fastsnap_slot) {
+            device_free_all(fastsnap_slot);
+            g_free(fastsnap_slot);
+            fastsnap_slot = NULL;
+        }
+        t0 = g_get_monotonic_time();
+        fastsnap_slot = device_save_all();
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        return 0;
+
+    case FASTSNAP_OP_RESTORE:
+        if (!fastsnap_slot) {
+            error_report("fastsnap: restore with no block taken");
+            return -1;
+        }
+        t0 = g_get_monotonic_time();
+        device_restore_all(fastsnap_slot);
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        return 0;
+
+    case FASTSNAP_OP_RELEASE:
+        if (fastsnap_slot) {
+            device_free_all(fastsnap_slot);
+            g_free(fastsnap_slot);
+            fastsnap_slot = NULL;
+        }
+        fastsnap_last_us = 0;
+        return 0;
+    }
+    return -1;
+}
+
+static void fastsnap_bh(void *opaque)
+{
+    FastsnapOp op = (FastsnapOp)(intptr_t)opaque;
+
+    /*
+     * Stop the vCPUs WITHOUT a runstate change -- see the file comment. This is
+     * the difference between a device restore and penguin_load_snapshot().
+     */
+    bool paused = !runstate_is_running();
+    if (!paused) {
+        pause_all_vcpus();
+    }
+
+    fastsnap_last_rc = fastsnap_do(op);
+
+    if (!paused) {
+        resume_all_vcpus();
+    }
+    fastsnap_seq++;
+}
+
+/*
+ * Fire-and-forget from any thread, including a vCPU inside a hypercall.
+ * Completion is observable through penguin_fastsnap_seq(); the result of the
+ * operation through penguin_fastsnap_last_rc() and the accessors below.
+ */
+void __attribute__((visibility("default")))
+penguin_fastsnap_schedule(int op)
+{
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), fastsnap_bh,
+                            (void *)(intptr_t)op);
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_seq(void)
+{
+    return fastsnap_seq;
+}
+
+int __attribute__((visibility("default")))
+penguin_fastsnap_last_rc(void)
+{
+    return fastsnap_last_rc;
+}
+
+/* Duration of the last completed take or restore, in microseconds. */
+int64_t __attribute__((visibility("default")))
+penguin_fastsnap_last_us(void)
+{
+    return fastsnap_last_us;
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_block_size(void)
+{
+    return fastsnap_slot ? fastsnap_slot->save_buffer_size : 0;
+}
+
+/* Number of sections a device block would cover on this machine. */
+int __attribute__((visibility("default")))
+penguin_fastsnap_section_count(void)
+{
+    char **list = device_list_all();
+    int n = 0;
+
+    while (list[n]) {
+        n++;
+    }
+    g_free(list);
+    return n;
+}
