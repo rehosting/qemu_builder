@@ -182,8 +182,9 @@ bool fastsnap_devices_is_restoring(void);
  *
  * Fire-and-forget. Poll penguin_fastsnap_seq() for completion, then read
  * penguin_fastsnap_last_rc() and the accessors. op: 0 take, 1 restore,
- * 2 release. Duration is measured in C because the operations are tens of
- * microseconds and a pyplugin round trip is hundreds.
+ * 2 release, 3 probe, 4 restore-and-verify. Duration is measured in C because
+ * the operations are tens of microseconds and a pyplugin round trip is
+ * hundreds.
  */
 void penguin_fastsnap_set_denylist(const char *csv);
 const char *penguin_fastsnap_section_names(void);

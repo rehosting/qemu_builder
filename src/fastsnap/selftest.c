@@ -27,7 +27,6 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
-#include "qemu/main-loop.h"
 #include "system/runstate.h"
 #include "system/system.h"
 #include "system/address-spaces.h"
@@ -96,7 +95,7 @@ static int fastsnap_await(uint64_t target_seq)
 static int fastsnap_selftest_scheduled(void)
 {
     VMChangeStateEntry *watch;
-    uint64_t seq;
+    uint64_t seq, take_digest;
     int failures = 0;
 
     /*
@@ -126,15 +125,39 @@ static int fastsnap_selftest_scheduled(void)
                penguin_fastsnap_last_us(), penguin_fastsnap_block_size(),
                penguin_fastsnap_section_count());
     }
+    take_digest = penguin_fastsnap_last_digest();
 
+    /*
+     * RESTORE_VERIFY rather than RESTORE, so this phase also gates the op the
+     * real-firmware harness depends on. Phase 1 can compare device_save_all()
+     * buffers directly because it runs with nothing executing; a caller on a
+     * running VM cannot, because the earliest it can schedule a probe is from
+     * a later guest event, by which time cpu and timer state have moved and no
+     * digest can ever match. RESTORE_VERIFY re-serialises inside the same
+     * bottom half, vCPUs still stopped, which is the only place the comparison
+     * means anything.
+     */
     seq = penguin_fastsnap_seq();
-    penguin_fastsnap_schedule(PENGUIN_FASTSNAP_RESTORE);
+    penguin_fastsnap_schedule(PENGUIN_FASTSNAP_RESTORE_VERIFY);
     if (fastsnap_await(seq + 1) || penguin_fastsnap_last_rc() != 0) {
         printf("fastsnap: FAIL - scheduled restore did not complete\n");
         failures++;
     } else {
         printf("fastsnap: scheduled restore %" PRId64 " us\n",
                penguin_fastsnap_last_us());
+        if (!take_digest) {
+            printf("fastsnap: FAIL - take reported no digest\n");
+            failures++;
+        } else if (penguin_fastsnap_last_digest() != take_digest) {
+            printf("fastsnap: FAIL - re-serialising immediately after the "
+                   "restore does not reproduce the block, so the restore is "
+                   "not faithful (take %" PRIu64 ", after restore %" PRIu64
+                   ")\n", take_digest, penguin_fastsnap_last_digest());
+            failures++;
+        } else {
+            printf("fastsnap: restore reproduces the block byte for byte "
+                   "(digest %" PRIu64 ")\n", take_digest);
+        }
     }
 
     /* THE assertion. */

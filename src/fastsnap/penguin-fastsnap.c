@@ -83,10 +83,25 @@ typedef enum {
     FASTSNAP_OP_RESTORE = PENGUIN_FASTSNAP_RESTORE,
     FASTSNAP_OP_RELEASE = PENGUIN_FASTSNAP_RELEASE,
     FASTSNAP_OP_PROBE = PENGUIN_FASTSNAP_PROBE,
+    FASTSNAP_OP_RESTORE_VERIFY = PENGUIN_FASTSNAP_RESTORE_VERIFY,
 } FastsnapOp;
 
 static uint64_t fastsnap_last_digest;
 static uint64_t fastsnap_probe_digest(void);
+
+/* FNV-1a 64. Not a cryptographic hash -- it exists to answer "are these the
+ * same bytes", between two points in one process. */
+static uint64_t fastsnap_hash(const uint8_t *p, size_t n)
+{
+    uint64_t h = 1469598103934665603ULL;
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
 
 /* BQL held, vCPUs stopped by the caller. */
 static int fastsnap_do(FastsnapOp op)
@@ -108,6 +123,12 @@ static int fastsnap_do(FastsnapOp op)
             fastsnap_slot = device_save_all();
         }
         fastsnap_last_us = g_get_monotonic_time() - t0;
+        /* After the clock, so the digest is not billed to the take. This is
+         * the "A" a RESTORE_VERIFY digest is compared against. */
+        fastsnap_last_digest = fastsnap_slot
+            ? fastsnap_hash(fastsnap_slot->save_buffer,
+                            fastsnap_slot->save_buffer_size)
+            : 0;
         return 0;
 
     case FASTSNAP_OP_RESTORE:
@@ -119,6 +140,20 @@ static int fastsnap_do(FastsnapOp op)
         device_restore_all(fastsnap_slot);
         fastsnap_last_us = g_get_monotonic_time() - t0;
         return 0;
+
+    case FASTSNAP_OP_RESTORE_VERIFY:
+        if (!fastsnap_slot) {
+            error_report("fastsnap: restore with no block taken");
+            return -1;
+        }
+        t0 = g_get_monotonic_time();
+        device_restore_all(fastsnap_slot);
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        /* Still in the same bottom half, vCPUs still stopped: nothing has
+         * executed since the restore, so re-serialising now must reproduce
+         * the block byte for byte if the restore was faithful. */
+        fastsnap_last_digest = fastsnap_probe_digest();
+        return fastsnap_last_digest ? 0 : -1;
 
     case FASTSNAP_OP_PROBE:
         t0 = g_get_monotonic_time();
@@ -190,8 +225,7 @@ static void fastsnap_bh(void *opaque)
 static uint64_t fastsnap_probe_digest(void)
 {
     DeviceSaveState *tmp;
-    uint64_t h = 1469598103934665603ULL;      /* FNV-1a 64 */
-    size_t i;
+    uint64_t h;
 
     tmp = fastsnap_denylist
         ? device_save_kind(DEVICE_SNAPSHOT_DENYLIST, fastsnap_denylist)
@@ -199,10 +233,7 @@ static uint64_t fastsnap_probe_digest(void)
     if (!tmp) {
         return 0;
     }
-    for (i = 0; i < tmp->save_buffer_size; i++) {
-        h ^= tmp->save_buffer[i];
-        h *= 1099511628211ULL;
-    }
+    h = fastsnap_hash(tmp->save_buffer, tmp->save_buffer_size);
     device_free_all(tmp);
     g_free(tmp);
     return h;
