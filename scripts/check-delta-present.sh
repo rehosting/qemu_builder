@@ -68,6 +68,22 @@ FASTSNAP_SYMS=(
     fastsnap_devices_is_restoring
 )
 
+# The Penguin-facing ABI. This is the half penguin actually dlsym()s, via the
+# cdef penguin-cffi-gen.py emits, so a build that dropped it would pass every
+# other check here and then fail at runtime on the first fastsnap call. Kept
+# as its own group so a failure names the ABI rather than the internals.
+PENGUIN_ABI_SYMS=(
+    penguin_fastsnap_schedule
+    penguin_fastsnap_seq
+    penguin_fastsnap_last_rc
+    penguin_fastsnap_last_us
+    penguin_fastsnap_last_digest
+    penguin_fastsnap_block_size
+    penguin_fastsnap_section_count
+    penguin_fastsnap_set_denylist
+    penguin_fastsnap_section_names
+)
+
 is_x86() { case "$1" in x86_64|intel64) return 0 ;; *) return 1 ;; esac; }
 
 shopt -s nullglob
@@ -81,7 +97,7 @@ for lib in "${libs[@]}"; do
     syms=$(nm -D --defined-only "$lib" 2>/dev/null | awk '{print $NF}')
     missing=()
 
-    for s in "${CORE_SYMS[@]}" "${FASTSNAP_SYMS[@]}"; do
+    for s in "${CORE_SYMS[@]}" "${FASTSNAP_SYMS[@]}" "${PENGUIN_ABI_SYMS[@]}"; do
         grep -qx "$s" <<<"$syms" || missing+=("$s")
     done
 
