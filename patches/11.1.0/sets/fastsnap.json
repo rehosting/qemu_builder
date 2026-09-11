@@ -1,0 +1,18 @@
+{
+  "name": "fastsnap",
+  "summary": "Device state in a block: save every non-iterative savevm section into one heap buffer and restore from it, for fast in-process snapshot restore under TCG.",
+  "origin": {
+    "kind": "adopted",
+    "project": "qemu-libafl-bridge",
+    "url": "https://github.com/AFLplusplus/qemu-libafl-bridge",
+    "commit": "4df4d2dcfa0d2eecfb267cddf5ebfb8ef9f58d87",
+    "upstreamQemuBase": "9.1.1",
+    "license": "GPL-2.0-or-later",
+    "provenance": "src/fastsnap/PROVENANCE.md"
+  },
+  "srcPaths": [
+    "src/fastsnap",
+    "src/include/fastsnap"
+  ],
+  "notes": "The adopted code is whole files under srcPaths, never interleaved into patch hunks. The series patch is ours: it adds accessors to migration/savevm.c so the adopted code never sees SaveStateEntry's layout, deliberately NOT the struct hoist the upstream project uses."
+}

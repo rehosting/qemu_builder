@@ -18,7 +18,7 @@ The declaration goes in include/system/penguin.h, which is a src/ file, so
 only the call site is a series change.
 
 License: MIT
-Origin: authored-by-igloo
+Patch-Set: igloo-core
 ---
  system/runstate.c | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)

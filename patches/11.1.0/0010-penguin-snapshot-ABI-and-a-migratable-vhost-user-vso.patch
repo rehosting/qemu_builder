@@ -11,7 +11,7 @@ snapshotted.
 Folds: 61b39d3eba, 3795e4c1ed
 
 License: GPL-2.0-only
-Origin: authored-by-igloo
+Patch-Set: igloo-core
 ---
  hw/virtio/vhost-user-vsock.c         | 123 ++++++++++++++++++++++++---
  include/hw/virtio/vhost-user-vsock.h |   1 +

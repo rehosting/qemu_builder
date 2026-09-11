@@ -15,7 +15,7 @@ Folds: 797f446cf8 (partial), 64cf743d12, c26a90a771 (partial), 9cdbac967b
 (partial)
 
 License: LGPL-2.1-or-later
-Origin: authored-by-igloo
+Patch-Set: igloo-core
 ---
  hw/i386/pc.c                  | 63 +++++++++++++++++++++++++++++++++++
  target/i386/tcg/misc_helper.c |  1 +

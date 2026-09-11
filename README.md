@@ -34,13 +34,25 @@ aggregate, so a repo-level "the patches are GPL-2.0" would be wrong about three
 patches, needlessly restrictive about four, and would hide the single patch
 (`0010`) that touches a GPL-2.0-**only** file.
 
-So every patch declares its own, in `License:` / `Origin:` trailers that live in
-the commit message and therefore travel inside the patch.
-`scripts/check-patch-licensing.py` recomputes the answer from the files and
-fails if the declaration disagrees; it runs in `series.yml`. The scaffolding
-(`build.sh`, the flake, `nix/`, `scripts/`, CI) is MIT and derivative of
-nothing. `LICENSING.md` has the detail; `src/fastsnap/PROVENANCE.md` covers the
-one directory of adopted third-party code.
+So every patch declares its own in a `License:` trailer, and names the project
+it belongs to in a `Patch-Set:` trailer — both in the commit message, so they
+travel inside the patch. `patches/<version>/sets/<name>.json` describes each set
+once: the upstream project, commit, licence, provenance document, and the
+`src/` directories that are the non-patch half of the same contribution.
+
+`scripts/check-patch-licensing.py` recomputes the licence from the files, and
+additionally requires that every patch names a real set, that a set's patches
+are **contiguous** in the series, and that no set is described without being
+used. It runs in `series.yml`.
+
+```
+set igloo-core   13 patches  authored  authored here
+set fastsnap      1 patches  adopted   qemu-libafl-bridge @ 4df4d2dcfa0d (GPL-2.0-or-later)
+```
+
+The scaffolding (`build.sh`, the flake, `nix/`, `scripts/`, CI) is MIT and
+derivative of nothing. `LICENSING.md` has the detail; `src/fastsnap/PROVENANCE.md`
+covers the one directory of adopted third-party code.
 
 ## The invariant that makes this work
 

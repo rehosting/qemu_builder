@@ -134,7 +134,13 @@ jobs:
       # about the LGPL ones, and would hide the one patch that touches a
       # GPL-2.0-ONLY file. Each patch declares its own, in trailers that travel
       # inside the patch; this recomputes the answer and requires them to match.
-      - name: Per-patch licensing is declared and correct
+      #
+      # It also enforces patch SETS: every patch names the project whose
+      # contribution it belongs to, each set is described once in
+      # patches/<ver>/sets/<name>.json, and a set's patches must stay
+      # contiguous -- so an adopted project's contribution can be reviewed,
+      # dropped or rebased as a unit instead of being reassembled by hand.
+      - name: Per-patch licensing and patch sets
         run: |
           set -eux
           . ./scripts/lib-extract.sh

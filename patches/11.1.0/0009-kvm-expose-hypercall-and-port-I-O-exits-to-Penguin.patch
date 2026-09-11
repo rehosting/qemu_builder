@@ -11,7 +11,7 @@ Folds: 8f837df542, 644b68587a, 797f446cf8 (partial), c26a90a771 (partial),
 9cdbac967b (partial)
 
 License: GPL-2.0-or-later
-Origin: authored-by-igloo
+Patch-Set: igloo-core
 ---
  accel/kvm/kvm-all.c   | 16 +++++---
  target/arm/kvm.c      | 20 ++++++++++

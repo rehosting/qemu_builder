@@ -10,7 +10,7 @@ IGLOO needs; a long cmdline was silently truncated at 256 bytes.
 Folds: 09473d353f
 
 License: MIT
-Origin: authored-by-igloo
+Patch-Set: igloo-core
 ---
  hw/mips/malta.c | 9 ++++++++-
  1 file changed, 8 insertions(+), 1 deletion(-)

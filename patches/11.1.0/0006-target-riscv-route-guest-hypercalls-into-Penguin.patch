@@ -12,7 +12,7 @@ subdirectory.
 Folds: 797f446cf8 (partial), d7f87bf73e (partial), 087a668076 (partial)
 
 License: GPL-2.0-or-later
-Origin: authored-by-igloo
+Patch-Set: igloo-core
 ---
  target/riscv/helper.h        |  1 +
  target/riscv/tcg/op_helper.c | 15 +++++++++++++++

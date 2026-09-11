@@ -9,7 +9,7 @@ one for dispatching a QMP command from Penguin.
 Folds: ad36639bde, b853deff4c
 
 License: LGPL-2.1-or-later
-Origin: authored-by-igloo
+Patch-Set: igloo-core
 ---
  qapi/qmp-dispatch.c | 47 +++++++++++++++++++++++++++++++++++++++++++++
  system/runstate.c   |  3 +++

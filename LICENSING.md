@@ -21,22 +21,75 @@ family is LGPL-2.1-or-later. So a repo-level "the patches are GPL-2.0" would be
 wrong about a seventh of them, needlessly restrictive about a third, and would
 quietly hide the one place the "or later" option is actually lost.
 
-## So the licence follows the patch
+## So the licence follows the patch, and the patch belongs to a set
 
 Each patch carries two trailers in its own commit message, which means they
 travel *inside* the patch and cannot drift away from it across a `git am` /
 `format-patch` round trip:
 
 ```
-License: <SPDX expression>
-Origin:  authored-by-igloo | <url>@<sha>
+License:   <SPDX expression>     what THIS patch is a derivative of
+Patch-Set: <set name>            which project's contribution it belongs to
 ```
+
+### Patch sets
+
+A feature is rarely one patch, and a feature adopted from another project needs
+its provenance stated once rather than copied onto every patch that belongs to
+it. So the series is partitioned into named sets, each described by
+`patches/<version>/sets/<name>.json` — where the incoming project, its commit,
+its licence and its provenance document live exactly once:
+
+```json
+{ "name": "fastsnap",
+  "summary": "Device state in a block ...",
+  "origin": { "kind": "adopted",
+              "project": "qemu-libafl-bridge",
+              "url": "https://github.com/AFLplusplus/qemu-libafl-bridge",
+              "commit": "4df4d2dcfa0d2eecfb267cddf5ebfb8ef9f58d87",
+              "upstreamQemuBase": "9.1.1",
+              "license": "GPL-2.0-or-later",
+              "provenance": "src/fastsnap/PROVENANCE.md" },
+  "srcPaths": ["src/fastsnap", "src/include/fastsnap"] }
+```
+
+Membership lives in the patch; description lives in the set file. That split is
+what survives editing — a patch cannot be renamed, split or reordered out of its
+set without the gate noticing, and a set's provenance cannot be updated in one
+place and go stale in thirteen others.
+
+**A set's patches must be contiguous in the series.** A project's contribution
+staying in one run is what makes it reviewable, droppable and rebasable as a
+unit; the moment it interleaves with another set's, "which patches came from
+where" becomes archaeology. The gate enforces it.
+
+**`srcPaths` is how a set covers the half of itself that is not a patch.**
+`fastsnap` is one series patch plus two directories of adopted source. Naming
+both in one place is what makes the set the *feature* rather than just its diff
+— and it is the reason the adopted code can live in `src/` as whole files,
+where its provenance stays legible, without becoming detached from the patch
+that needs it.
+
+Today:
+
+| set | patches | origin |
+|---|---|---|
+| `igloo-core` | `0001`–`0013` | authored here |
+| `fastsnap` | `0014` | adopted, `qemu-libafl-bridge@4df4d2dcfa`, GPL-2.0-or-later, `src/fastsnap/PROVENANCE.md` |
+
+### The gate
 
 `scripts/check-patch-licensing.py` **recomputes** each patch's effective licence
 from the files it touches and fails if the declaration disagrees. It runs in
 `series.yml`, the fast gate. Adding a file to a patch's footprint therefore
 fails CI if that file's licence changes the answer — the same
 no-parallel-list-that-can-drift discipline `configs/*.json` uses for `nixDeps`.
+
+It also fails when a patch names no set, names one with no description, when a
+set's patches interleave with another's, when a set file is described but no
+patch claims it, when an adopted set omits its project, url, commit, licence or
+provenance, or when a `srcPath` does not exist. Each of those was verified to
+fail; none of them is a convention anyone has to remember.
 
 Combining rule, most permissive to least — a derivative of several files must be
 offered under terms satisfying all of them:
