@@ -13,6 +13,11 @@
 # This is the cheap middle: it cannot prove a hypercall WORKS, but it proves
 # every patch that should contribute code to a given library actually did.
 #
+# fastsnap is the one part of the delta that DOES have a behavioural gate:
+# `nix flake check` builds a single aarch64 target and runs its round-trip
+# selftest. This still covers it statically, because that check builds one
+# target and this covers all fourteen.
+#
 # TWO GUEST-ENTRY PATHS, and the check must know the difference. Twelve targets
 # reach Penguin through a TCG helper (helper_penguin_guest_hypercall, one patch
 # per arch). x86 does NOT: it has no convenient spare instruction, so the guest
@@ -37,6 +42,18 @@ CORE_SYMS=(
 TCG_SYM=helper_penguin_guest_hypercall   # every target EXCEPT x86
 IOPORT_STR=penguin-hypercall             # x86 only: the port-0x88 MemoryRegion name
 
+# The fastsnap patch + src/fastsnap/ must contribute these to EVERY system
+# library too. They are a separate group from CORE_SYMS only so a failure says
+# which half of the delta went missing.
+FASTSNAP_SYMS=(
+    device_save_all
+    device_save_kind
+    device_restore_all
+    device_free_all
+    device_list_all
+    fastsnap_devices_is_restoring
+)
+
 is_x86() { case "$1" in x86_64|intel64) return 0 ;; *) return 1 ;; esac; }
 
 shopt -s nullglob
@@ -50,7 +67,7 @@ for lib in "${libs[@]}"; do
     syms=$(nm -D --defined-only "$lib" 2>/dev/null | awk '{print $NF}')
     missing=()
 
-    for s in "${CORE_SYMS[@]}"; do
+    for s in "${CORE_SYMS[@]}" "${FASTSNAP_SYMS[@]}"; do
         grep -qx "$s" <<<"$syms" || missing+=("$s")
     done
 

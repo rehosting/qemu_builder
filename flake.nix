@@ -51,10 +51,16 @@
           inherit src extraBuildInputs;
           version = "${base.tag}-igloo";
         };
+
+        # The one behavioural gate in this repo: builds a single aarch64 target
+        # with a real binary and runs src/fastsnap/selftest.c against it.
+        fastsnap-selftest = pkgs.callPackage ./nix/fastsnap-selftest.nix {
+          inherit src;
+        };
       in
       {
         packages = {
-          inherit penguin-qemu src;
+          inherit penguin-qemu src fastsnap-selftest;
 
           # Introspection for scripts/check-config-contract.sh: the store paths
           # of the libraries configs/default.json declares. It MUST come from
@@ -88,7 +94,11 @@
         };
 
         # `nix flake check` runs the series gate: the patches must apply to the
-        # pristine upstream tarball and produce base.json's recorded tree.
+        # pristine upstream tarball and produce base.json's recorded tree --
+        # and the fastsnap round trip, which is the only check here that
+        # executes anything. It costs a single-target QEMU build.
+        checks.fastsnap-selftest = fastsnap-selftest;
+
         checks.series = pkgs.runCommand "series-applies" { } ''
           test -d ${src}
           test -f ${src}/system/penguin.c

@@ -112,8 +112,8 @@ static int device_save_section(SaveStateEntry *se, const char *idstr,
 }
 
 /* BQL held, vCPUs stopped. */
-DeviceSaveState * __attribute__((visibility("default")))
-device_save_kind(DeviceSnapshotKind kind, char **names)
+__attribute__((visibility("default")))
+DeviceSaveState *device_save_kind(DeviceSnapshotKind kind, char **names)
 {
     DeviceSaveState *dss = g_new0(DeviceSaveState, 1);
     QIOChannelBufferWriteback *wbioc;
@@ -144,8 +144,8 @@ device_save_kind(DeviceSnapshotKind kind, char **names)
     return dss;
 }
 
-DeviceSaveState * __attribute__((visibility("default")))
-device_save_all(void)
+__attribute__((visibility("default")))
+DeviceSaveState *device_save_all(void)
 {
     return device_save_kind(DEVICE_SNAPSHOT_ALL, NULL);
 }
@@ -216,8 +216,8 @@ static int device_list_section(SaveStateEntry *se, const char *idstr,
     return 0;
 }
 
-char ** __attribute__((visibility("default")))
-device_list_all(void)
+__attribute__((visibility("default")))
+char **device_list_all(void)
 {
     DeviceListCtx ctx = { 0 };
 
