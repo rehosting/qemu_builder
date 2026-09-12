@@ -43,8 +43,14 @@
 #include "qemu/aio.h"
 #include "system/cpus.h"
 #include "system/runstate.h"
+#include "system/ramblock.h"
+#include "system/ramlist.h"
+#include "qemu/rcu.h"
 
 #include "fastsnap/device-save.h"
+#include "fastsnap/dirty-track.h"
+#include "fastsnap/fork-oracle.h"
+#include "fastsnap/ram-snapshot.h"
 #include "fastsnap/penguin-fastsnap.h"
 
 /*
@@ -75,6 +81,7 @@ static DeviceSaveState *fastsnap_slot;
  */
 static char **fastsnap_denylist;
 static int64_t fastsnap_last_us;
+static int64_t fastsnap_diff_us;
 static uint64_t fastsnap_seq;
 static int fastsnap_last_rc = -1;
 
@@ -84,10 +91,25 @@ typedef enum {
     FASTSNAP_OP_RELEASE = PENGUIN_FASTSNAP_RELEASE,
     FASTSNAP_OP_PROBE = PENGUIN_FASTSNAP_PROBE,
     FASTSNAP_OP_RESTORE_VERIFY = PENGUIN_FASTSNAP_RESTORE_VERIFY,
+    FASTSNAP_OP_STATE_DIGEST = PENGUIN_FASTSNAP_STATE_DIGEST,
+    FASTSNAP_OP_FORK_REF = PENGUIN_FASTSNAP_FORK_REF,
+    FASTSNAP_OP_FORK_DIFF = PENGUIN_FASTSNAP_FORK_DIFF,
+    FASTSNAP_OP_FORK_DROP = PENGUIN_FASTSNAP_FORK_DROP,
+    FASTSNAP_OP_DIRTY_ARM = PENGUIN_FASTSNAP_DIRTY_ARM,
+    FASTSNAP_OP_DIRTY_COUNT = PENGUIN_FASTSNAP_DIRTY_COUNT,
+    FASTSNAP_OP_DIRTY_STOP = PENGUIN_FASTSNAP_DIRTY_STOP,
+    FASTSNAP_OP_RAM_SNAPSHOT = PENGUIN_FASTSNAP_RAM_SNAPSHOT,
+    FASTSNAP_OP_RAM_RESTORE = PENGUIN_FASTSNAP_RAM_RESTORE,
+    FASTSNAP_OP_RAM_RELEASE = PENGUIN_FASTSNAP_RAM_RELEASE,
+    FASTSNAP_OP_LOOP_ARM = PENGUIN_FASTSNAP_LOOP_ARM,
+    FASTSNAP_OP_LOOP_RESET = PENGUIN_FASTSNAP_LOOP_RESET,
+    FASTSNAP_OP_LOOP_RESET_VERIFY = PENGUIN_FASTSNAP_LOOP_RESET_VERIFY,
 } FastsnapOp;
 
 static uint64_t fastsnap_last_digest;
+static uint64_t fastsnap_last_ram_digest;
 static uint64_t fastsnap_probe_digest(void);
+static uint64_t fastsnap_ram_digest(void);
 
 /* FNV-1a 64. Not a cryptographic hash -- it exists to answer "are these the
  * same bytes", between two points in one process. */
@@ -99,6 +121,66 @@ static uint64_t fastsnap_hash(const uint8_t *p, size_t n)
     for (i = 0; i < n; i++) {
         h ^= p[i];
         h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/*
+ * FNV-1a over 64-bit words rather than bytes.
+ *
+ * The byte-wise fastsnap_hash() above is right for the device block, which is
+ * tens of kilobytes. Guest RAM is six orders of magnitude bigger: byte-at-a-time
+ * over 256 MB is ~100 ms, which would make the oracle's own measurement the
+ * dominant cost of using it. Same construction, eight bytes at a time.
+ *
+ * This answers "are these the same bytes" between two points, nothing more. It
+ * is not a cryptographic hash and must not be used as one.
+ */
+static uint64_t fastsnap_hash64(const void *p, size_t n, uint64_t h)
+{
+    const uint64_t *w = p;
+    const uint8_t *tail;
+    size_t words = n / sizeof(uint64_t);
+    size_t i;
+
+    for (i = 0; i < words; i++) {
+        h ^= w[i];
+        h *= 1099511628211ULL;
+    }
+    tail = (const uint8_t *)p + words * sizeof(uint64_t);
+    for (i = 0; i < n % sizeof(uint64_t); i++) {
+        h ^= tail[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/*
+ * Every RAM block, in list order. The block's idstr and length are mixed in as
+ * well as its contents, so that a block appearing, disappearing or being
+ * resized changes the digest rather than silently shifting the comparison.
+ *
+ * Blocks with no host mapping are skipped by name, not ignored: their identity
+ * still enters the hash, so one becoming unmapped is visible.
+ *
+ * BQL is held and the vCPUs are stopped by the caller, so the contents cannot
+ * move under us. The RCU read lock is still taken because the block list itself
+ * is RCU-protected.
+ */
+static uint64_t fastsnap_ram_digest(void)
+{
+    RAMBlock *block;
+    uint64_t h = 1469598103934665603ULL;
+
+    RCU_READ_LOCK_GUARD();
+    RAMBLOCK_FOREACH(block) {
+        uint64_t len = block->used_length;
+
+        h = fastsnap_hash64(block->idstr, strlen(block->idstr), h);
+        h = fastsnap_hash64(&len, sizeof(len), h);
+        if (block->host) {
+            h = fastsnap_hash64(block->host, block->used_length, h);
+        }
     }
     return h;
 }
@@ -153,6 +235,137 @@ static int fastsnap_do(FastsnapOp op)
          * executed since the restore, so re-serialising now must reproduce
          * the block byte for byte if the restore was faithful. */
         fastsnap_last_digest = fastsnap_probe_digest();
+        return fastsnap_last_digest ? 0 : -1;
+
+    case FASTSNAP_OP_LOOP_ARM:
+        t0 = g_get_monotonic_time();
+        if (fastsnap_slot) {
+            device_free_all(fastsnap_slot);
+            g_free(fastsnap_slot);
+            fastsnap_slot = NULL;
+        }
+        fastsnap_slot = fastsnap_denylist
+            ? device_save_kind(DEVICE_SNAPSHOT_DENYLIST, fastsnap_denylist)
+            : device_save_all();
+        if (!fastsnap_slot) {
+            error_report("fastsnap: loop arm could not take a device block");
+            return -1;
+        }
+        if (fastsnap_ram_snapshot_take() != 0) {
+            return -1;
+        }
+        /* Same bottom half as the snapshot, so the reference and the snapshot
+         * are the same instant. See the header comment. */
+        if (fastsnap_fork_ref_take() != 0) {
+            return -1;
+        }
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        fastsnap_last_digest = fastsnap_hash(fastsnap_slot->save_buffer,
+                                             fastsnap_slot->save_buffer_size);
+        return 0;
+
+    case FASTSNAP_OP_LOOP_RESET: {
+        int64_t n;
+        if (!fastsnap_slot) {
+            error_report("fastsnap: loop reset with no device block");
+            return -1;
+        }
+        t0 = g_get_monotonic_time();
+        device_restore_all(fastsnap_slot);
+        n = fastsnap_ram_restore();
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        return n < 0 ? -1 : 0;
+    }
+
+    case FASTSNAP_OP_LOOP_RESET_VERIFY: {
+        int64_t n, d, t1;
+        if (!fastsnap_slot) {
+            error_report("fastsnap: loop reset with no device block");
+            return -1;
+        }
+        t0 = g_get_monotonic_time();
+        device_restore_all(fastsnap_slot);
+        n = fastsnap_ram_restore();
+        t1 = g_get_monotonic_time();
+        fastsnap_last_us = t1 - t0;
+        if (n < 0) {
+            return -1;
+        }
+        /* Same bottom half, so the guest has not run since the reset and any
+         * difference found here is the reset's, not the guest's. */
+        d = fastsnap_fork_ref_diff();
+        fastsnap_diff_us = g_get_monotonic_time() - t1;
+        return d < 0 ? -1 : 0;
+    }
+
+    case FASTSNAP_OP_RAM_SNAPSHOT:
+        t0 = g_get_monotonic_time();
+        if (fastsnap_ram_snapshot_take() != 0) {
+            return -1;
+        }
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        return 0;
+
+    case FASTSNAP_OP_RAM_RESTORE: {
+        int64_t n;
+        t0 = g_get_monotonic_time();
+        n = fastsnap_ram_restore();
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        return n < 0 ? -1 : 0;
+    }
+
+    case FASTSNAP_OP_RAM_RELEASE:
+        fastsnap_ram_snapshot_release();
+        fastsnap_last_us = 0;
+        return 0;
+
+    case FASTSNAP_OP_FORK_REF:
+        t0 = g_get_monotonic_time();
+        if (fastsnap_fork_ref_take() != 0) {
+            return -1;
+        }
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        return 0;
+
+    case FASTSNAP_OP_FORK_DIFF: {
+        int64_t d;
+        t0 = g_get_monotonic_time();
+        d = fastsnap_fork_ref_diff();
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        return d < 0 ? -1 : 0;
+    }
+
+    case FASTSNAP_OP_FORK_DROP:
+        fastsnap_fork_ref_drop();
+        fastsnap_last_us = 0;
+        return 0;
+
+    case FASTSNAP_OP_DIRTY_ARM:
+        t0 = g_get_monotonic_time();
+        if (fastsnap_dirty_arm() != 0) {
+            return -1;
+        }
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        return 0;
+
+    case FASTSNAP_OP_DIRTY_COUNT: {
+        int64_t n;
+        t0 = g_get_monotonic_time();
+        n = fastsnap_dirty_count();
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        return n < 0 ? -1 : 0;
+    }
+
+    case FASTSNAP_OP_DIRTY_STOP:
+        fastsnap_dirty_stop();
+        fastsnap_last_us = 0;
+        return 0;
+
+    case FASTSNAP_OP_STATE_DIGEST:
+        t0 = g_get_monotonic_time();
+        fastsnap_last_ram_digest = fastsnap_ram_digest();
+        fastsnap_last_digest = fastsnap_probe_digest();
+        fastsnap_last_us = g_get_monotonic_time() - t0;
         return fastsnap_last_digest ? 0 : -1;
 
     case FASTSNAP_OP_PROBE:
@@ -309,6 +522,82 @@ uint64_t __attribute__((visibility("default")))
 penguin_fastsnap_last_digest(void)
 {
     return fastsnap_last_digest;
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_last_ram_digest(void)
+{
+    return fastsnap_last_ram_digest;
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_diff_pages(void)
+{
+    return fastsnap_fork_diff_pages();
+}
+
+/* Cost of the last fork-oracle comparison, kept out of last_us(): the diff
+ * reads the whole of guest RAM back through process_vm_readv() and is tens of
+ * milliseconds, while the reset it checks is hundreds of microseconds. A loop
+ * pays for the reset every iteration and for the oracle only when it asks. */
+int64_t __attribute__((visibility("default")))
+penguin_fastsnap_diff_us(void)
+{
+    return fastsnap_diff_us;
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_ram_restored_pages(void)
+{
+    return fastsnap_ram_restored_pages();
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_ram_snapshot_bytes(void)
+{
+    return fastsnap_ram_snapshot_bytes();
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_diff_bytes_checked(void)
+{
+    return fastsnap_fork_bytes_checked();
+}
+
+const char * __attribute__((visibility("default")))
+penguin_fastsnap_diff_report(void)
+{
+    return fastsnap_fork_report();
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_dirty_pages(void)
+{
+    return fastsnap_dirty_pages();
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_dirty_pages_scanned(void)
+{
+    return fastsnap_dirty_pages_scanned();
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_dirty_page_size(void)
+{
+    return fastsnap_dirty_page_size();
+}
+
+const char * __attribute__((visibility("default")))
+penguin_fastsnap_dirty_report(void)
+{
+    return fastsnap_dirty_report();
+}
+
+const char * __attribute__((visibility("default")))
+penguin_fastsnap_dirty_blocks(void)
+{
+    return fastsnap_dirty_blocks();
 }
 
 uint64_t __attribute__((visibility("default")))

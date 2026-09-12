@@ -3,6 +3,7 @@
 # Generate CFFI-friendly declarations for Penguin's QEMU embedding ABI.
 
 import argparse
+import re
 import json
 import tarfile
 from pathlib import Path
@@ -181,21 +182,52 @@ bool fastsnap_devices_is_restoring(void);
  * block can go stale and the flush is unnecessary rather than merely costly.
  *
  * Fire-and-forget. Poll penguin_fastsnap_seq() for completion, then read
- * penguin_fastsnap_last_rc() and the accessors. op: 0 take, 1 restore,
- * 2 release, 3 probe, 4 restore-and-verify. Duration is measured in C because
- * the operations are tens of microseconds and a pyplugin round trip is
- * hundreds.
+ * penguin_fastsnap_last_rc() and the accessors. The op numbers and the
+ * prototypes below are EXTRACTED from include/fastsnap/penguin-fastsnap.h at
+ * generation time rather than restated here -- a hand-kept copy of an ABI
+ * drifts, and this one did: six ops and eleven accessors were added to the
+ * header and not to this file, so cffi never declared them, _lib_symbol()
+ * returned None, and the Python bindings quietly handed back 0 and -1 for a
+ * whole run. Nothing raised. Duration is measured in C because the
+ * operations are hundreds of microseconds and a pyplugin round trip is
+ * comparable to them.
  */
-void penguin_fastsnap_set_denylist(const char *csv);
-const char *penguin_fastsnap_section_names(void);
-void penguin_fastsnap_schedule(int op);
-uint64_t penguin_fastsnap_seq(void);
-int penguin_fastsnap_last_rc(void);
-int64_t penguin_fastsnap_last_us(void);
-uint64_t penguin_fastsnap_last_digest(void);
-uint64_t penguin_fastsnap_block_size(void);
-int penguin_fastsnap_section_count(void);
+{fastsnap_decls}
 """
+
+
+def fastsnap_decls():
+    """Every penguin_fastsnap_* prototype, read out of the real header.
+
+    NOT a copy. The previous version of this file restated the prototypes, the
+    header grew six ops and eleven accessors, and this file did not: cffi never
+    saw the new names, ffi.cdef had no declaration for them, _lib_symbol()
+    returned None, and the Python bindings returned their "symbol absent"
+    fallbacks -- 0 for a byte count, -1 for a page count -- for an entire run.
+    Every one of those is a value the caller could plausibly have received from
+    a working build, so nothing raised and nothing looked wrong until a
+    256 MB RAM snapshot reported itself as 0 bytes.
+
+    An empty extraction is a hard error for the same reason. A generated header
+    with no fastsnap declarations in it produces exactly the failure above,
+    silently, and the only honest response to "I could not find the ABI" is to
+    stop.
+    """
+    header = Path(__file__).resolve().parent.parent / "include" / "fastsnap" \
+        / "penguin-fastsnap.h"
+    if not header.exists():
+        raise SystemExit(f"penguin-cffi-gen: cannot find {header}; refusing to "
+                         f"emit a header with no fastsnap ABI in it")
+    pat = re.compile(
+        r"^((?:void|int|int64_t|uint64_t|bool|const char \*)\s*"
+        r"penguin_fastsnap_\w+\([^;]*\);)$", re.M)
+    decls = pat.findall(header.read_text())
+    if not decls:
+        raise SystemExit(f"penguin-cffi-gen: found no penguin_fastsnap_* "
+                         f"prototypes in {header}; the extraction is broken, "
+                         f"and emitting the header anyway would hand cffi a "
+                         f"silently incomplete ABI")
+    return "\n".join(decls)
 
 
 def split_csv(value):
@@ -241,7 +273,8 @@ def kvm_entries(targets):
 def write_header(build_dir, entry):
     vaddr_type = "uint32_t" if entry["vaddr_bits"] == 32 else "uint64_t"
     path = build_dir / entry["header"]
-    path.write_text(HEADER_TEMPLATE.format(vaddr_type=vaddr_type))
+    path.write_text(HEADER_TEMPLATE.format(vaddr_type=vaddr_type,
+                                           fastsnap_decls=fastsnap_decls()))
     return path
 
 

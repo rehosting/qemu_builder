@@ -115,6 +115,54 @@ stdenv.mkDerivation {
              "is not evidence of anything" >&2; exit 1; }
     # Phase 2 must have actually run. If the binary reverts to a build where it
     # does not, the PASSED line alone would not notice.
+    grep -q '^fastsnap: control OK - state digest sees a RAM change$' selftest.log || {
+      echo "the state-digest control did not pass; a digest that cannot see a"
+      echo "RAM change makes every oracle comparison built on it meaningless"
+      exit 1
+    }
+    grep -q '^fastsnap: state digest is reproducible$' selftest.log || {
+      echo "state digest is not a pure function of guest state"
+      exit 1
+    }
+    # The dirty-page counter. Three separate controls, and the third is the
+    # one that matters for using it in a loop: a tracker that measures the
+    # first interval and silently under-counts every one after it passes the
+    # other two. See phase 5 in src/fastsnap/selftest.c.
+    grep -q '^fastsnap: control OK - 8 poked pages' selftest.log || {
+      echo "the dirty-page counter did not see 8 known writes, or did not name"
+      echo "the pages it saw. A dirty-set number from it would be unfalsifiable."
+      exit 1
+    }
+    grep -q '^fastsnap: control OK - dirty tracking re-arms' selftest.log || {
+      echo "dirty tracking does not re-arm after a count, so only the first"
+      echo "interval is measured and every later one under-counts"
+      exit 1
+    }
+    grep -q '^fastsnap: dirty set returns to baseline' selftest.log || {
+      echo "the dirty set is not consumed by a count, so an interval's number"
+      echo "is not that interval's"
+      exit 1
+    }
+    # The complete reset, judged by an oracle that shares no code with it:
+    # the reference is a forked child read back with process_vm_readv(), the
+    # restore reads an in-process copy. Neither can launder the other.
+    grep -q '^fastsnap: LOOP OK' selftest.log || {
+      echo "a complete reset did not return the guest to the forked reference."
+      echo "Restoring devices without RAM rewinds the CPU page-table base into"
+      echo "RAM that was never rewound; on real firmware that kills the guest."
+      exit 1
+    }
+    # The form a running guest needs: reset and oracle in ONE bottom half.
+    # Split across two, the guest executes in the gap and a correct reset
+    # reports hundreds of differing pages -- the oracle would be usable only on
+    # a machine that is not running.
+    grep -q '^fastsnap: VERIFY OK' selftest.log || {
+      echo "reset+verify did not pass. Either it compared less than the whole"
+      echo "snapshot, or it charged the oracle's tens of milliseconds to the"
+      echo "reset -- which would make every verified reset number wrong by two"
+      echo "orders of magnitude, and look plausible while doing it."
+      exit 1
+    }
     grep -q 'no RUN_STATE_RESTORE_VM transition' selftest.log || {
         echo "FAIL: the no-tb_flush assertion did not run" >&2; exit 1; }
     grep -q '^fastsnap: scheduled restore ' selftest.log || {
@@ -129,6 +177,11 @@ stdenv.mkDerivation {
     runHook preInstall
     mkdir -p "$out"
     cp selftest.log "$out/selftest.log"
+    # TEMPORARY (profiling lane): keep the binary so the profile harness can be
+    # driven from the host with env vars instead of a rebuild per experiment.
+    mkdir -p "$out/bin" "$out/share"
+    cp qemu-system-aarch64 "$out/bin/"
+    cp -r ../pc-bios "$out/share/qemu"
     runHook postInstall
   '';
 

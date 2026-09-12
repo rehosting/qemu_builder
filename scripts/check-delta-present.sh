@@ -77,11 +77,14 @@ PENGUIN_ABI_SYMS=(
     penguin_fastsnap_seq
     penguin_fastsnap_last_rc
     penguin_fastsnap_last_us
-    penguin_fastsnap_last_digest
+    penguin_fastsnap_last_digest penguin_fastsnap_last_ram_digest
     penguin_fastsnap_block_size
     penguin_fastsnap_section_count
     penguin_fastsnap_set_denylist
     penguin_fastsnap_section_names
+    penguin_fastsnap_dirty_pages penguin_fastsnap_dirty_pages_scanned
+    penguin_fastsnap_dirty_page_size penguin_fastsnap_dirty_report
+    penguin_fastsnap_dirty_blocks
 )
 
 is_x86() { case "$1" in x86_64|intel64) return 0 ;; *) return 1 ;; esac; }

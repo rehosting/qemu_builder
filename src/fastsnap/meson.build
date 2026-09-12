@@ -7,6 +7,9 @@
 system_ss.add(files(
   'channel-buffer-writeback.c',
   'device-save.c',
+  'dirty-track.c',
+  'fork-oracle.c',
   'penguin-fastsnap.c',
+  'ram-snapshot.c',
   'selftest.c',
 ))
