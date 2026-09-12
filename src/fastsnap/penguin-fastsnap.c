@@ -111,6 +111,7 @@ static char *fastsnap_dev_diff_names;
 static int64_t fastsnap_last_us;
 static int64_t fastsnap_diff_us;
 static uint64_t fastsnap_seq;
+static int64_t fastsnap_bh_done_us;
 static int fastsnap_last_rc = -1;
 
 typedef enum {
@@ -542,6 +543,11 @@ static void fastsnap_bh(void *opaque)
     if (!paused) {
         resume_all_vcpus();
     }
+    /*
+     * Stamped before the sequence number is published, so a caller that sees
+     * the bump can always read a timestamp that belongs to that operation.
+     */
+    fastsnap_bh_done_us = g_get_monotonic_time();
     fastsnap_seq++;
 }
 
@@ -818,4 +824,36 @@ const char * __attribute__((visibility("default")))
 penguin_fastsnap_dev_diff_report(void)
 {
     return fastsnap_dev_diff_names ? fastsnap_dev_diff_names : "";
+}
+
+/*
+ * When the last bottom half finished, on CLOCK_MONOTONIC in microseconds.
+ *
+ * This splits a loop iteration at the only place a caller cannot see. An
+ * iteration measured from Python spans: schedule the reset, wait for the main
+ * loop to pick the bottom half up, run it, resume the guest, and wait for the
+ * guest to reach the next detector hit that polls for completion. last_us()
+ * reports only the middle of that -- the operation itself -- so everything
+ * else is one undifferentiated remainder, and on this lane's target that
+ * remainder is two thirds of an ordinary iteration and 99% of one that ends in
+ * a crash.
+ *
+ * With this, the remainder splits in two:
+ *
+ *     scheduled -> bh_done_us    main-loop latency plus the operation
+ *     bh_done_us -> observed     guest execution plus the caller's own cost
+ *
+ * which is the difference between "the reset is slow" and "the round trip is
+ * slow", and those have opposite fixes.
+ *
+ * g_get_monotonic_time() is clock_gettime(CLOCK_MONOTONIC) and so is Python's
+ * time.clock_gettime(time.CLOCK_MONOTONIC), same epoch, so the two can be
+ * subtracted. time.perf_counter() is the same clock on Linux but is not
+ * documented to share an epoch with anything; callers should use the explicit
+ * form.
+ */
+int64_t __attribute__((visibility("default")))
+penguin_fastsnap_bh_done_us(void)
+{
+    return fastsnap_bh_done_us;
 }

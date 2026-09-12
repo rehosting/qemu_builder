@@ -220,6 +220,7 @@ void penguin_fastsnap_schedule(int op);
 uint64_t penguin_fastsnap_seq(void);
 int penguin_fastsnap_last_rc(void);
 int64_t penguin_fastsnap_last_us(void);
+int64_t penguin_fastsnap_bh_done_us(void);
 uint64_t penguin_fastsnap_last_digest(void);
 uint64_t penguin_fastsnap_last_ram_digest(void);
 uint64_t penguin_fastsnap_diff_pages(void);
