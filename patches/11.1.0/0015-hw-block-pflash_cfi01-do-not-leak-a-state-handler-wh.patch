@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: igloo <nix@local>
+Date: Fri, 11 Sep 2026 21:59:05 -0400
+Subject: [PATCH] hw/block/pflash_cfi01: do not leak a state handler when
+ post_load repeats
+
+postload_update_cb() deletes the handler it was registered with, so a
+conventional loadvm registers exactly one: load, resume, callback fires,
+handler goes away.
+
+Nothing in the vmstate contract promises a run-state change follows a
+post_load, though. A caller that restores device state repeatedly without one
+appends a handler per load and drops none. Every state change walks that list,
+so the cost grows quadratically in the number of loads and the allocation is
+unbounded. Measured with such a caller, this device's restore went from 6.5 us
+to 77 us over 4,320 loads -- a 12x drift in what should be a constant.
+
+Drop any handler still outstanding before registering the next one. Under the
+conventional path pfl->vmstate is already NULL here, so this changes nothing.
+
+License: LGPL-2.1-or-later
+Patch-Set: fastsnap
+---
+ hw/block/pflash_cfi01.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/hw/block/pflash_cfi01.c b/hw/block/pflash_cfi01.c
+index 5b9ddb20b18c1b6e950324dd0fbc1bb87d95f2e2..02187bd258e19e6f5e414fd5814f41a0b1821196 100644
+--- a/hw/block/pflash_cfi01.c
++++ b/hw/block/pflash_cfi01.c
+@@ -1031,6 +1031,18 @@ static int pflash_post_load(void *opaque, int version_id)
+     PFlashCFI01 *pfl = opaque;
+ 
+     if (!pfl->ro) {
++        /*
++         * postload_update_cb() removes this handler when it runs, so the usual
++         * load path registers exactly one. But nothing guarantees a state
++         * change follows a post_load -- a caller that restores device state
++         * repeatedly without one (fuzzing reset loops do exactly this) would
++         * otherwise append a handler per load and never drop any. The list is
++         * walked on every state change, so the cost is quadratic in loads and
++         * the leak is unbounded.
++         */
++        if (pfl->vmstate) {
++            qemu_del_vm_change_state_handler(pfl->vmstate);
++        }
+         pfl->vmstate = qemu_add_vm_change_state_handler(postload_update_cb,
+                                                         pfl);
+     }

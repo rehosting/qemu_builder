@@ -6,3 +6,4 @@ pyvenv/
 *.tar.gz
 built
 selftest*
+__pycache__/
