@@ -231,6 +231,21 @@ char **device_list_all(void)
     return ctx.list;
 }
 
+/*
+ * Would a block scoped this way have carried this section?
+ *
+ * Exposed because "this section differs from the reference" means two
+ * completely different things depending on the answer, and the difference is
+ * not cosmetic -- it is the difference between a scope that is too narrow and
+ * a device that cannot round-trip at all. See fastsnap_dev_diff_compute().
+ */
+bool __attribute__((visibility("default")))
+device_section_in_scope(const char *idstr, DeviceSnapshotKind kind,
+                        char **names)
+{
+    return section_wanted(idstr, false, kind, names);
+}
+
 uint64_t __attribute__((visibility("default")))
 fastsnap_block_hash(const uint8_t *p, size_t n)
 {

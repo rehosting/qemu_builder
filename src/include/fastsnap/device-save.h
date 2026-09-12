@@ -70,6 +70,9 @@ typedef struct DeviceSectionDigest {
 
 DeviceSectionDigest *device_section_digests(int *n_out);
 
+bool device_section_in_scope(const char *idstr, DeviceSnapshotKind kind,
+                             char **names);
+
 /*
  * FNV-1a 64 over a byte range. Not a cryptographic hash -- it answers "are
  * these the same bytes", between two points in one process. Shared so that the

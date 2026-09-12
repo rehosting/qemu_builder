@@ -106,6 +106,7 @@ static char **fastsnap_allowlist;
 static DeviceSectionDigest *fastsnap_dev_ref;
 static int fastsnap_dev_ref_n;
 static int fastsnap_dev_diff_n = -1;
+static int fastsnap_dev_unrestorable_n = -1;
 static char *fastsnap_dev_diff_names;
 
 static int64_t fastsnap_last_us;
@@ -220,6 +221,21 @@ static DeviceSaveState *fastsnap_take_block(void)
     return device_save_all();
 }
 
+/* The scope fastsnap_take_block() would apply, as a (kind, names) pair. */
+static DeviceSnapshotKind fastsnap_scope(char ***names_out)
+{
+    if (fastsnap_allowlist) {
+        *names_out = fastsnap_allowlist;
+        return DEVICE_SNAPSHOT_ALLOWLIST;
+    }
+    if (fastsnap_denylist) {
+        *names_out = fastsnap_denylist;
+        return DEVICE_SNAPSHOT_DENYLIST;
+    }
+    *names_out = NULL;
+    return DEVICE_SNAPSHOT_ALL;
+}
+
 /*
  * Capture the full per-section reference, discarding any previous one.
  * Returns 0, or -1 if the walk could not complete -- in which case the
@@ -263,12 +279,15 @@ static int fastsnap_dev_ref_take(void)
 static void fastsnap_dev_diff_compute(void)
 {
     DeviceSectionDigest *now;
+    DeviceSnapshotKind kind;
+    char **scope_names;
     GString *names;
-    int n_now, i, ndiff = 0;
+    int n_now, i, ndiff = 0, nunres = 0;
 
     g_free(fastsnap_dev_diff_names);
     fastsnap_dev_diff_names = NULL;
     fastsnap_dev_diff_n = -1;
+    fastsnap_dev_unrestorable_n = -1;
 
     if (!fastsnap_dev_ref) {
         return;
@@ -284,32 +303,68 @@ static void fastsnap_dev_diff_compute(void)
                         fastsnap_dev_ref_n, n_now);
         g_free(now);
         fastsnap_dev_diff_n = -1;
+        fastsnap_dev_unrestorable_n = -1;
         fastsnap_dev_diff_names = g_string_free(names, FALSE);
         return;
     }
 
+    kind = fastsnap_scope(&scope_names);
+
     for (i = 0; i < n_now; i++) {
         const char *why = NULL;
+        bool in_block;
 
         if (strcmp(fastsnap_dev_ref[i].idstr, now[i].idstr)) {
             why = "!";          /* the list reordered under us */
         } else if (fastsnap_dev_ref[i].digest != now[i].digest ||
                    fastsnap_dev_ref[i].len != now[i].len) {
+            /*
+             * TWO DIFFERENT FINDINGS, and conflating them sent a real
+             * derivation down a false trail.
+             *
+             * A section the block did NOT carry differs because the scope is
+             * too narrow. That is the allowlist question, and adding the
+             * section fixes it.
+             *
+             * A section the block DID carry, restored from it, and that still
+             * does not serialise to the same bytes, is telling you something
+             * else entirely: its save is not a pure function of its restorable
+             * state. mc146818rtc is the worked example -- rtc_pre_save() calls
+             * rtc_update_time(), which reads the live clock, and
+             * rtc_post_load() re-derives its timers from the current clock, so
+             * it CANNOT come back byte-identical however correct the restore
+             * is. Reported as "unrestorable" it is a fact about the device;
+             * reported as a scope miss it is an instruction to add a section
+             * that is already there, which is what happened: a run added it,
+             * the report did not change, and throughput halved.
+             *
+             * So: '*' means it was in the block. Counted separately, never
+             * folded into the scope answer, and never silently forgiven --
+             * a genuine restore bug lands in the same bucket and has to be
+             * visible.
+             */
             why = "";
         }
         if (why) {
+            in_block = device_section_in_scope(now[i].idstr, kind,
+                                               scope_names);
             /*
              * The index is part of the name in the report because the name
              * alone does not identify the section -- two entries can share it.
              */
-            g_string_append_printf(names, "%s%s%s#%d", ndiff ? "," : "", why,
-                                   now[i].idstr, i);
-            ndiff++;
+            g_string_append_printf(names, "%s%s%s%s#%d", ndiff + nunres ? "," : "",
+                                   why, in_block ? "*" : "", now[i].idstr, i);
+            if (in_block) {
+                nunres++;
+            } else {
+                ndiff++;
+            }
         }
     }
 
     g_free(now);
     fastsnap_dev_diff_n = ndiff;
+    fastsnap_dev_unrestorable_n = nunres;
     fastsnap_dev_diff_names = g_string_free(names, FALSE);
 }
 
@@ -856,4 +911,23 @@ int64_t __attribute__((visibility("default")))
 penguin_fastsnap_bh_done_us(void)
 {
     return fastsnap_bh_done_us;
+}
+
+/*
+ * Sections that WERE in the block, were restored from it, and still do not
+ * serialise to the reference's bytes.
+ *
+ * Kept apart from dev_diff_sections() because the two license opposite
+ * actions. A scope miss is fixed by widening the scope. This is not: either
+ * the device's save is not a pure function of its restorable state -- see the
+ * mc146818rtc case in fastsnap_dev_diff_compute() -- or the restore is
+ * genuinely broken for that device. Neither is fixed by adding it to an
+ * allowlist it is already in.
+ *
+ * -1 when no comparison could be made, which is not zero.
+ */
+int __attribute__((visibility("default")))
+penguin_fastsnap_dev_unrestorable_sections(void)
+{
+    return fastsnap_dev_unrestorable_n;
 }

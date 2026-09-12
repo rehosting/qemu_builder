@@ -1076,7 +1076,8 @@ static int fastsnap_selftest_loop(void)
                    PRId64 " us and the diff at %" PRId64 " us; the oracle's "
                    "cost is being charged to the reset\n", rus, dus);
             failures++;
-        } else if (penguin_fastsnap_dev_diff_sections() != 0) {
+        } else if (penguin_fastsnap_dev_diff_sections() != 0 ||
+                   penguin_fastsnap_dev_unrestorable_sections() != 0) {
             /*
              * The control for phase 8. This reset restored the FULL device
              * set, so every section must match the reference -- if the device
@@ -1084,10 +1085,20 @@ static int fastsnap_selftest_loop(void)
              * and the non-zero it reports for a scoped reset below would mean
              * nothing.
              */
+            /*
+             * Machine-specific, and deliberately so on THIS machine. A section
+             * whose save is not a pure function of its restorable state can
+             * never match -- mc146818rtc reads the live clock in pre_save and
+             * re-derives its timers in post_load, so a malta guest reports it
+             * as unrestorable forever, correctly. -M virt has no such section,
+             * which is what makes a zero here meaningful and what makes phase
+             * 8's positive control below readable.
+             */
             printf("fastsnap: FAIL - a full-block reset left %d device "
-                   "sections differing from the reference (%s); the device "
-                   "oracle cannot be trusted to score an allowlist\n",
+                   "sections out of scope and %d unrestorable (%s); the "
+                   "device oracle cannot be trusted to score an allowlist\n",
                    penguin_fastsnap_dev_diff_sections(),
+                   penguin_fastsnap_dev_unrestorable_sections(),
                    penguin_fastsnap_dev_diff_report());
             failures++;
         } else {
@@ -1096,6 +1107,8 @@ static int fastsnap_selftest_loop(void)
                    "differ, in one bottom half\n",
                    rus, dus, checked,
                    penguin_fastsnap_dev_diff_sections());
+            printf("fastsnap: every device section on this machine "
+                   "round-trips (0 unrestorable)\n");
         }
     }
 
@@ -1209,6 +1222,15 @@ static int fastsnap_selftest_allowlist(void)
                    "and then written to, and the device oracle still reports "
                    "0 sections differing. A clean score for any allowlist "
                    "would prove nothing.\n", pl011_id);
+            failures++;
+        } else if (penguin_fastsnap_dev_unrestorable_sections() != 0) {
+            printf("fastsnap: FAIL - the oracle put %d sections in the "
+                   "unrestorable bucket (%s) on a machine where phase 7 just "
+                   "showed every section round-trips. A section that was in "
+                   "the block cannot be a scope miss and vice versa; if the "
+                   "two buckets can be confused, an allowlist derived from "
+                   "them adds sections it already has.\n",
+                   penguin_fastsnap_dev_unrestorable_sections(), report);
             failures++;
         } else if (!strstr(report, pl011_id)) {
             printf("fastsnap: FAIL - the device oracle reports %d sections "

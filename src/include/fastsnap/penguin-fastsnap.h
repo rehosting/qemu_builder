@@ -237,6 +237,13 @@ const char *penguin_fastsnap_dirty_blocks(void);
 uint64_t penguin_fastsnap_block_size(void);
 int penguin_fastsnap_section_count(void);
 int penguin_fastsnap_dev_diff_sections(void);
+int penguin_fastsnap_dev_unrestorable_sections(void);
 const char *penguin_fastsnap_dev_diff_report(void);
+/*
+ * Report format: comma-separated "<flags><idstr>#<index>". '*' means the
+ * section WAS in the block (so it is unrestorable, not a scope miss), '!'
+ * means the handler list itself changed under the comparison. The index is
+ * part of the identity because section ids repeat.
+ */
 
 #endif /* FASTSNAP_PENGUIN_FASTSNAP_H */

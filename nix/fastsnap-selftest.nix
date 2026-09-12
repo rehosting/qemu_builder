@@ -168,6 +168,19 @@ stdenv.mkDerivation {
     # section is dropped from the block and then written to, and the device
     # oracle must both notice and name it. Without that pairing, a clean score
     # for a scoped reset is indistinguishable from an oracle that never looks.
+    # The two buckets must be distinguishable. A section IN the block that
+    # still differs is unrestorable (its save is not a pure function of its
+    # restorable state, or the restore is broken); a section NOT in the block
+    # that differs is a scope miss. Conflating them sent a real allowlist
+    # derivation down a false trail -- it added a section that was already in
+    # the block, the report did not change, and throughput halved.
+    grep -q '^fastsnap: every device section on this machine round-trips' selftest.log || {
+      echo "the full-block control did not establish that every section on"
+      echo "this machine round-trips, so phase 8's positive control cannot be"
+      echo "read: a non-zero there would be ambiguous between a dropped"
+      echo "section and a device that never comes back identical."
+      exit 1
+    }
     grep -q '^fastsnap: ALLOWLIST OK' selftest.log || {
       echo "the device allowlist phase did not pass. Either a scoped reset"
       echo "disturbed RAM, or the per-section device oracle could not see a"
