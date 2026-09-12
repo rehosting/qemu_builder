@@ -26,6 +26,7 @@
 #include "qemu/main-loop.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
+#include "qemu/cutils.h"
 
 #include "fastsnap/channel-buffer-writeback.h"
 #include "fastsnap/device-save.h"
@@ -228,4 +229,94 @@ char **device_list_all(void)
     }
     ctx.list[ctx.n] = NULL;
     return ctx.list;
+}
+
+uint64_t __attribute__((visibility("default")))
+fastsnap_block_hash(const uint8_t *p, size_t n)
+{
+    uint64_t h = 1469598103934665603ULL;
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+typedef struct DeviceDigestCtx {
+    DeviceSectionDigest *out;
+    int n;
+    int cap;
+    uint8_t *scratch;       /* reused across sections; see below */
+    bool failed;
+} DeviceDigestCtx;
+
+/*
+ * One section into the scratch buffer, hashed, discarded.
+ *
+ * The buffer is allocated once for the whole walk rather than per section.
+ * FASTSNAP_DEVICE_BLOCK_LIMIT is 32 MB of address space, and a machine with
+ * seventeen sections would otherwise map and unmap half a gigabyte on every
+ * verification lap -- for digests of a few hundred bytes each.
+ *
+ * A section that fails to save marks the whole walk failed rather than being
+ * skipped. A missing entry would read downstream as "this section did not
+ * change", which is the one answer it definitely does not license.
+ */
+static int device_digest_section(SaveStateEntry *se, const char *idstr,
+                                 bool iterative, void *opaque)
+{
+    DeviceDigestCtx *ctx = opaque;
+    QIOChannelBufferWriteback *wbioc;
+    Error *err = NULL;
+    QEMUFile *f;
+    size_t used = 0;
+    int ret;
+
+    if (!section_wanted(idstr, iterative, DEVICE_SNAPSHOT_ALL, NULL)) {
+        return 0;
+    }
+
+    wbioc = qio_channel_buffer_writeback_new(FASTSNAP_DEVICE_BLOCK_LIMIT,
+                                             ctx->scratch,
+                                             FASTSNAP_DEVICE_BLOCK_LIMIT,
+                                             &used);
+    f = qemu_file_new_output(QIO_CHANNEL(wbioc));
+    ret = qemu_savevm_save_one(f, se, &err);
+    qemu_fclose(f);
+    if (ret < 0) {
+        error_reportf_err(err, "fastsnap: digesting section '%s': ", idstr);
+        ctx->failed = true;
+        return ret;
+    }
+    error_free(err);
+
+    if (ctx->n + 1 > ctx->cap) {
+        ctx->cap = ctx->cap ? ctx->cap * 2 : 32;
+        ctx->out = g_renew(DeviceSectionDigest, ctx->out, ctx->cap);
+    }
+    pstrcpy(ctx->out[ctx->n].idstr, sizeof(ctx->out[ctx->n].idstr), idstr);
+    ctx->out[ctx->n].digest = fastsnap_block_hash(ctx->scratch, used);
+    ctx->out[ctx->n].len = used;
+    ctx->n++;
+    return 0;
+}
+
+__attribute__((visibility("default")))
+DeviceSectionDigest *device_section_digests(int *n_out)
+{
+    DeviceDigestCtx ctx = { 0 };
+
+    ctx.scratch = g_new(uint8_t, FASTSNAP_DEVICE_BLOCK_LIMIT);
+    qemu_savevm_foreach_handler(device_digest_section, &ctx);
+    g_free(ctx.scratch);
+
+    if (ctx.failed) {
+        g_free(ctx.out);
+        *n_out = -1;
+        return NULL;
+    }
+    *n_out = ctx.n;
+    return ctx.out;
 }

@@ -72,20 +72,26 @@ FASTSNAP_SYMS=(
 # cdef penguin-cffi-gen.py emits, so a build that dropped it would pass every
 # other check here and then fail at runtime on the first fastsnap call. Kept
 # as its own group so a failure names the ABI rather than the internals.
-PENGUIN_ABI_SYMS=(
-    penguin_fastsnap_schedule
-    penguin_fastsnap_seq
-    penguin_fastsnap_last_rc
-    penguin_fastsnap_last_us
-    penguin_fastsnap_last_digest penguin_fastsnap_last_ram_digest
-    penguin_fastsnap_block_size
-    penguin_fastsnap_section_count
-    penguin_fastsnap_set_denylist
-    penguin_fastsnap_section_names
-    penguin_fastsnap_dirty_pages penguin_fastsnap_dirty_pages_scanned
-    penguin_fastsnap_dirty_page_size penguin_fastsnap_dirty_report
-    penguin_fastsnap_dirty_blocks
+#
+# Derived from the header, not restated here. A hand-kept copy of this list is
+# exactly the drift that made eleven Python bindings silently uncallable: the
+# generator restated the prototypes, the header grew, and every accessor the
+# list had missed returned a plausible default instead of raising. The same
+# list written out twice will diverge; the only question is when and how
+# quietly. src/scripts/penguin-cffi-gen.py extracts the same set the same way.
+FASTSNAP_HDR="$(dirname "$0")/../src/include/fastsnap/penguin-fastsnap.h"
+[ -f "$FASTSNAP_HDR" ] || {
+    echo "FAIL: cannot find $FASTSNAP_HDR; refusing to check an empty ABI" >&2
+    exit 1
+}
+mapfile -t PENGUIN_ABI_SYMS < <(
+    grep -oE '^(void|int|int64_t|uint64_t|bool|const char \*) *penguin_fastsnap_[a-z0-9_]+' \
+        "$FASTSNAP_HDR" | grep -oE 'penguin_fastsnap_[a-z0-9_]+' | sort -u
 )
+[ ${#PENGUIN_ABI_SYMS[@]} -gt 0 ] || {
+    echo "FAIL: extracted no ABI symbols from $FASTSNAP_HDR" >&2
+    exit 1
+}
 
 is_x86() { case "$1" in x86_64|intel64) return 0 ;; *) return 1 ;; esac; }
 

@@ -191,7 +191,30 @@
  */
 #define PENGUIN_FASTSNAP_LOOP_RESET_VERIFY 17
 
+/*
+ * SCOPING THE DEVICE BLOCK, and why the second oracle exists.
+ *
+ * The device half is the larger half of a reset by an order of magnitude:
+ * measured, seventeen sections restore in 0.752 ms and {cpu, timer} in
+ * 0.043 ms, against a RAM half of tens of microseconds. So an allowlist is the
+ * biggest single lever on iteration rate -- and the most dangerous knob in this
+ * ABI, because a section left out does not fail. It drifts, and the guest
+ * misbehaves some thousands of iterations later with nothing pointing back.
+ *
+ * penguin_fastsnap_dev_diff_sections() is the check that makes it usable.
+ * LOOP_ARM records a digest of EVERY section, whatever the block is scoped to;
+ * LOOP_RESET_VERIFY re-digests them after the reset and reports which differ.
+ * Zero means the reset put back everything, including what the allowlist
+ * omitted -- which is the case that licenses the allowlist, because a section
+ * the workload never touches costs nothing to skip.
+ *
+ * Note what this is NOT. It is one workload's answer, and a section can be
+ * unchanged for thousands of laps and change on the next input; that is why
+ * the count is reported per verification lap rather than checked once. A
+ * denylist stays the conservative default.
+ */
 void penguin_fastsnap_set_denylist(const char *csv);
+void penguin_fastsnap_set_allowlist(const char *csv);
 const char *penguin_fastsnap_section_names(void);
 void penguin_fastsnap_schedule(int op);
 uint64_t penguin_fastsnap_seq(void);
@@ -212,5 +235,7 @@ const char *penguin_fastsnap_dirty_report(void);
 const char *penguin_fastsnap_dirty_blocks(void);
 uint64_t penguin_fastsnap_block_size(void);
 int penguin_fastsnap_section_count(void);
+int penguin_fastsnap_dev_diff_sections(void);
+const char *penguin_fastsnap_dev_diff_report(void);
 
 #endif /* FASTSNAP_PENGUIN_FASTSNAP_H */

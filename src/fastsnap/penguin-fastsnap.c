@@ -80,6 +80,34 @@ static DeviceSaveState *fastsnap_slot;
  * to. That is the announced trade: the fast path gives up the network backend.
  */
 static char **fastsnap_denylist;
+
+/*
+ * Sections to keep IN the block, NULL-terminated, owned here. Mutually
+ * exclusive with the denylist; setting one clears the other.
+ *
+ * This is the performance lever, and it is the larger of the two halves of a
+ * reset: measured, a full seventeen-section block restores in 0.752 ms and a
+ * two-section {cpu, timer} block in 0.043 ms, against a RAM half of tens of
+ * microseconds. It is also the dangerous one. A denylist is conservative by
+ * construction -- a device nobody named still gets restored -- whereas an
+ * allowlist silently drops every section the caller did not think of, and a
+ * dropped section does not fail, it drifts.
+ *
+ * So it is paired with the per-section device reference below, which names
+ * what a scoped reset failed to put back rather than leaving it to be
+ * discovered as a guest that misbehaves three thousand iterations later.
+ */
+static char **fastsnap_allowlist;
+
+/*
+ * Per-section digests of the FULL device set at the last LOOP_ARM, and the
+ * result of comparing them after a reset. See device_section_digests().
+ */
+static DeviceSectionDigest *fastsnap_dev_ref;
+static int fastsnap_dev_ref_n;
+static int fastsnap_dev_diff_n = -1;
+static char *fastsnap_dev_diff_names;
+
 static int64_t fastsnap_last_us;
 static int64_t fastsnap_diff_us;
 static uint64_t fastsnap_seq;
@@ -111,24 +139,10 @@ static uint64_t fastsnap_last_ram_digest;
 static uint64_t fastsnap_probe_digest(void);
 static uint64_t fastsnap_ram_digest(void);
 
-/* FNV-1a 64. Not a cryptographic hash -- it exists to answer "are these the
- * same bytes", between two points in one process. */
-static uint64_t fastsnap_hash(const uint8_t *p, size_t n)
-{
-    uint64_t h = 1469598103934665603ULL;
-    size_t i;
-
-    for (i = 0; i < n; i++) {
-        h ^= p[i];
-        h *= 1099511628211ULL;
-    }
-    return h;
-}
-
 /*
  * FNV-1a over 64-bit words rather than bytes.
  *
- * The byte-wise fastsnap_hash() above is right for the device block, which is
+ * The byte-wise fastsnap_block_hash() above is right for the device block, which is
  * tens of kilobytes. Guest RAM is six orders of magnitude bigger: byte-at-a-time
  * over 256 MB is ~100 ms, which would make the oracle's own measurement the
  * dominant cost of using it. Same construction, eight bytes at a time.
@@ -185,6 +199,119 @@ static uint64_t fastsnap_ram_digest(void)
     return h;
 }
 
+/*
+ * How a block is scoped, in one place.
+ *
+ * TAKE, LOOP_ARM and the probe digest all have to agree: a probe that hashed a
+ * full block while the slot held a scoped one would report a difference on
+ * every comparison and read as a failing restore.
+ *
+ * BQL held, vCPUs stopped by the caller.
+ */
+static DeviceSaveState *fastsnap_take_block(void)
+{
+    if (fastsnap_allowlist) {
+        return device_save_kind(DEVICE_SNAPSHOT_ALLOWLIST, fastsnap_allowlist);
+    }
+    if (fastsnap_denylist) {
+        return device_save_kind(DEVICE_SNAPSHOT_DENYLIST, fastsnap_denylist);
+    }
+    return device_save_all();
+}
+
+/*
+ * Capture the full per-section reference, discarding any previous one.
+ * Returns 0, or -1 if the walk could not complete -- in which case the
+ * reference is cleared, so a later comparison reports "no reference" rather
+ * than comparing against a partial one.
+ */
+static int fastsnap_dev_ref_take(void)
+{
+    g_free(fastsnap_dev_ref);
+    fastsnap_dev_ref = device_section_digests(&fastsnap_dev_ref_n);
+    if (!fastsnap_dev_ref) {
+        fastsnap_dev_ref_n = 0;
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Compare the device state as it is now against the reference, section by
+ * section, and record how many differ and which.
+ *
+ * MATCHED BY POSITION, NOT BY NAME, and that is not a detail. Section ids are
+ * not unique: -M virt registers two sections both called "pflash_cfi01",
+ * distinguished only by an instance id that the handler-list accessor does not
+ * expose. A name-keyed join matches the second reference entry against the
+ * first current one, and then reports a difference on every comparison for a
+ * machine where nothing changed -- which is how this function first behaved,
+ * and it took a real device (one whose subsection genuinely can appear between
+ * an arm and a reset) to make the false positive look like a true one.
+ *
+ * Both walks come from qemu_savevm_foreach_handler() over the same list, so
+ * index i is the same handler in both unless the list itself changed. A
+ * changed list is reported rather than worked around: a differing count, or a
+ * differing name at the same index, is a hot-plug or hot-unplug between the arm
+ * and the reset, and "the device set moved underneath us" is never the same
+ * answer as "nothing differs".
+ *
+ * Sets the count to -1 if there is no reference or the walk failed, which
+ * callers must not read as zero.
+ */
+static void fastsnap_dev_diff_compute(void)
+{
+    DeviceSectionDigest *now;
+    GString *names;
+    int n_now, i, ndiff = 0;
+
+    g_free(fastsnap_dev_diff_names);
+    fastsnap_dev_diff_names = NULL;
+    fastsnap_dev_diff_n = -1;
+
+    if (!fastsnap_dev_ref) {
+        return;
+    }
+    now = device_section_digests(&n_now);
+    if (!now) {
+        return;
+    }
+
+    names = g_string_new(NULL);
+    if (n_now != fastsnap_dev_ref_n) {
+        g_string_printf(names, "!section-count %d->%d",
+                        fastsnap_dev_ref_n, n_now);
+        g_free(now);
+        fastsnap_dev_diff_n = -1;
+        fastsnap_dev_diff_names = g_string_free(names, FALSE);
+        return;
+    }
+
+    for (i = 0; i < n_now; i++) {
+        const char *why = NULL;
+
+        if (strcmp(fastsnap_dev_ref[i].idstr, now[i].idstr)) {
+            why = "!";          /* the list reordered under us */
+        } else if (fastsnap_dev_ref[i].digest != now[i].digest ||
+                   fastsnap_dev_ref[i].len != now[i].len) {
+            why = "";
+        }
+        if (why) {
+            /*
+             * The index is part of the name in the report because the name
+             * alone does not identify the section -- two entries can share it.
+             */
+            g_string_append_printf(names, "%s%s%s#%d", ndiff ? "," : "", why,
+                                   now[i].idstr, i);
+            ndiff++;
+        }
+    }
+
+    g_free(now);
+    fastsnap_dev_diff_n = ndiff;
+    fastsnap_dev_diff_names = g_string_free(names, FALSE);
+}
+
 /* BQL held, vCPUs stopped by the caller. */
 static int fastsnap_do(FastsnapOp op)
 {
@@ -198,17 +325,12 @@ static int fastsnap_do(FastsnapOp op)
             fastsnap_slot = NULL;
         }
         t0 = g_get_monotonic_time();
-        if (fastsnap_denylist) {
-            fastsnap_slot = device_save_kind(DEVICE_SNAPSHOT_DENYLIST,
-                                             fastsnap_denylist);
-        } else {
-            fastsnap_slot = device_save_all();
-        }
+        fastsnap_slot = fastsnap_take_block();
         fastsnap_last_us = g_get_monotonic_time() - t0;
         /* After the clock, so the digest is not billed to the take. This is
          * the "A" a RESTORE_VERIFY digest is compared against. */
         fastsnap_last_digest = fastsnap_slot
-            ? fastsnap_hash(fastsnap_slot->save_buffer,
+            ? fastsnap_block_hash(fastsnap_slot->save_buffer,
                             fastsnap_slot->save_buffer_size)
             : 0;
         return 0;
@@ -244,9 +366,7 @@ static int fastsnap_do(FastsnapOp op)
             g_free(fastsnap_slot);
             fastsnap_slot = NULL;
         }
-        fastsnap_slot = fastsnap_denylist
-            ? device_save_kind(DEVICE_SNAPSHOT_DENYLIST, fastsnap_denylist)
-            : device_save_all();
+        fastsnap_slot = fastsnap_take_block();
         if (!fastsnap_slot) {
             error_report("fastsnap: loop arm could not take a device block");
             return -1;
@@ -260,8 +380,20 @@ static int fastsnap_do(FastsnapOp op)
             return -1;
         }
         fastsnap_last_us = g_get_monotonic_time() - t0;
-        fastsnap_last_digest = fastsnap_hash(fastsnap_slot->save_buffer,
+        fastsnap_last_digest = fastsnap_block_hash(fastsnap_slot->save_buffer,
                                              fastsnap_slot->save_buffer_size);
+        /*
+         * After the clock: the per-section reference is a diagnostic the loop
+         * reads on verification laps only, and an arm is paid for once. Its
+         * failure is reported and does not fail the arm -- the reset is still
+         * sound without it -- but it leaves the reference empty so a later
+         * comparison says "no reference" instead of "nothing differed".
+         */
+        if (fastsnap_dev_ref_take() != 0) {
+            error_report("fastsnap: could not take a per-section device "
+                         "reference; device verification is unavailable for "
+                         "this arm");
+        }
         return 0;
 
     case FASTSNAP_OP_LOOP_RESET: {
@@ -292,8 +424,14 @@ static int fastsnap_do(FastsnapOp op)
             return -1;
         }
         /* Same bottom half, so the guest has not run since the reset and any
-         * difference found here is the reset's, not the guest's. */
+         * difference found here is the reset's, not the guest's. Both oracles
+         * run here for that reason: RAM against the fork reference, devices
+         * against the per-section reference. The device oracle is what makes an
+         * allowlist checkable -- the RAM oracle cannot see a device section
+         * that was never restored, only the guest damage it eventually causes.
+         */
         d = fastsnap_fork_ref_diff();
+        fastsnap_dev_diff_compute();
         fastsnap_diff_us = g_get_monotonic_time() - t1;
         return d < 0 ? -1 : 0;
     }
@@ -440,13 +578,11 @@ static uint64_t fastsnap_probe_digest(void)
     DeviceSaveState *tmp;
     uint64_t h;
 
-    tmp = fastsnap_denylist
-        ? device_save_kind(DEVICE_SNAPSHOT_DENYLIST, fastsnap_denylist)
-        : device_save_all();
+    tmp = fastsnap_take_block();
     if (!tmp) {
         return 0;
     }
-    h = fastsnap_hash(tmp->save_buffer, tmp->save_buffer_size);
+    h = fastsnap_block_hash(tmp->save_buffer, tmp->save_buffer_size);
     device_free_all(tmp);
     g_free(tmp);
     return h;
@@ -457,19 +593,56 @@ static uint64_t fastsnap_probe_digest(void)
  * Takes effect on the next take. Call before scheduling one; it touches only
  * this module's own state, so it does not need the main loop.
  */
+static char **fastsnap_split(const char *csv)
+{
+    char **v;
+
+    if (!csv || !*csv) {
+        return NULL;
+    }
+    v = g_strsplit(csv, ",", -1);
+    /* g_strsplit keeps surrounding whitespace; device-save.c compares with
+     * strcmp, so trim here rather than silently never matching. */
+    for (char **p = v; *p; p++) {
+        g_strstrip(*p);
+    }
+    return v;
+}
+
 void __attribute__((visibility("default")))
 penguin_fastsnap_set_denylist(const char *csv)
 {
     g_strfreev(fastsnap_denylist);
-    fastsnap_denylist = NULL;
+    fastsnap_denylist = fastsnap_split(csv);
+    if (fastsnap_denylist && fastsnap_allowlist) {
+        /*
+         * Both would mean two different answers to "is this section in the
+         * block", and device-save.c takes exactly one kind. Clearing the other
+         * is the only behaviour that cannot be misread: leaving both set and
+         * picking a precedence would make the scoping depend on which setter
+         * was called last in a way nothing reports.
+         */
+        g_strfreev(fastsnap_allowlist);
+        fastsnap_allowlist = NULL;
+    }
+}
 
-    if (csv && *csv) {
-        fastsnap_denylist = g_strsplit(csv, ",", -1);
-        /* g_strsplit keeps surrounding whitespace; device-save.c compares with
-         * strcmp, so trim here rather than silently never matching. */
-        for (char **p = fastsnap_denylist; *p; p++) {
-            g_strstrip(*p);
-        }
+/*
+ * Comma-separated section ids to keep IN the block, or NULL/"" to clear.
+ * Clears any denylist. Takes effect on the next take.
+ *
+ * Read penguin_fastsnap_section_names() first: an id that matches nothing is
+ * not an error here, and an allowlist of entirely mistyped names produces an
+ * empty block that restores nothing, quickly.
+ */
+void __attribute__((visibility("default")))
+penguin_fastsnap_set_allowlist(const char *csv)
+{
+    g_strfreev(fastsnap_allowlist);
+    fastsnap_allowlist = fastsnap_split(csv);
+    if (fastsnap_allowlist && fastsnap_denylist) {
+        g_strfreev(fastsnap_denylist);
+        fastsnap_denylist = NULL;
     }
 }
 
@@ -618,4 +791,31 @@ penguin_fastsnap_section_count(void)
     }
     g_free(list);
     return n;
+}
+
+/*
+ * How many device sections differ from the reference taken at the last
+ * LOOP_ARM, as of the last LOOP_RESET_VERIFY.
+ *
+ * Zero means the reset put every section back -- including the ones an
+ * allowlist excluded from the block, which is the interesting case: a section
+ * the guest never touches does not need restoring. Anything above zero names
+ * what a scoped reset is giving up, and -1 means the comparison could not be
+ * made (no reference, or the walk failed). -1 must not be read as zero.
+ */
+int __attribute__((visibility("default")))
+penguin_fastsnap_dev_diff_sections(void)
+{
+    return fastsnap_dev_diff_n;
+}
+
+/*
+ * Comma-separated ids of the differing sections. A leading '-' marks a section
+ * that was in the reference and is gone now, '+' one that appeared. Empty when
+ * nothing differs. Valid until the next LOOP_RESET_VERIFY.
+ */
+const char * __attribute__((visibility("default")))
+penguin_fastsnap_dev_diff_report(void)
+{
+    return fastsnap_dev_diff_names ? fastsnap_dev_diff_names : "";
 }

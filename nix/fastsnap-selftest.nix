@@ -163,6 +163,18 @@ stdenv.mkDerivation {
       echo "orders of magnitude, and look plausible while doing it."
       exit 1
     }
+    # The device allowlist: the biggest lever on reset cost and the only one
+    # whose failure is silent. The gate is the CONTROL, not the pass -- a
+    # section is dropped from the block and then written to, and the device
+    # oracle must both notice and name it. Without that pairing, a clean score
+    # for a scoped reset is indistinguishable from an oracle that never looks.
+    grep -q '^fastsnap: ALLOWLIST OK' selftest.log || {
+      echo "the device allowlist phase did not pass. Either a scoped reset"
+      echo "disturbed RAM, or the per-section device oracle could not see a"
+      echo "section that was deliberately left out of the block and dirtied --"
+      echo "in which case no allowlist measurement built on it means anything."
+      exit 1
+    }
     grep -q 'no RUN_STATE_RESTORE_VM transition' selftest.log || {
         echo "FAIL: the no-tb_flush assertion did not run" >&2; exit 1; }
     grep -q '^fastsnap: scheduled restore ' selftest.log || {

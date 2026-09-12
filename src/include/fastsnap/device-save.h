@@ -45,6 +45,38 @@ void device_free_all(DeviceSaveState *dss);
  */
 char **device_list_all(void);
 
+/*
+ * Per-section digests of the device state as it is RIGHT NOW.
+ *
+ * This exists to answer a question a whole-block digest cannot: a scoped
+ * restore (allowlist or denylist) puts back only some sections, so "the block
+ * came back" is true by construction and says nothing about the sections that
+ * were left out. Digesting each section separately and comparing two such
+ * arrays names the sections a stretch of guest execution actually moved, which
+ * is the measurement a candidate allowlist has to be judged against.
+ *
+ * Always covers the FULL section set, whatever scoping the caller has
+ * configured for its block -- a reference that shrank with the allowlist would
+ * make every allowlist look sufficient.
+ *
+ * BQL held, vCPUs stopped. g_free() the returned array; the strings are
+ * embedded in it.
+ */
+typedef struct DeviceSectionDigest {
+    char idstr[256];
+    uint64_t digest;
+    uint64_t len;
+} DeviceSectionDigest;
+
+DeviceSectionDigest *device_section_digests(int *n_out);
+
+/*
+ * FNV-1a 64 over a byte range. Not a cryptographic hash -- it answers "are
+ * these the same bytes", between two points in one process. Shared so that the
+ * whole-block digest and the per-section digests cannot drift apart.
+ */
+uint64_t fastsnap_block_hash(const uint8_t *p, size_t n);
+
 bool fastsnap_devices_is_restoring(void);
 
 #endif /* FASTSNAP_DEVICE_SAVE_H */

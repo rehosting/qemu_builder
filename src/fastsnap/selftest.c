@@ -1076,10 +1076,26 @@ static int fastsnap_selftest_loop(void)
                    PRId64 " us and the diff at %" PRId64 " us; the oracle's "
                    "cost is being charged to the reset\n", rus, dus);
             failures++;
+        } else if (penguin_fastsnap_dev_diff_sections() != 0) {
+            /*
+             * The control for phase 8. This reset restored the FULL device
+             * set, so every section must match the reference -- if the device
+             * oracle cannot report zero here it is not a usable instrument,
+             * and the non-zero it reports for a scoped reset below would mean
+             * nothing.
+             */
+            printf("fastsnap: FAIL - a full-block reset left %d device "
+                   "sections differing from the reference (%s); the device "
+                   "oracle cannot be trusted to score an allowlist\n",
+                   penguin_fastsnap_dev_diff_sections(),
+                   penguin_fastsnap_dev_diff_report());
+            failures++;
         } else {
             printf("fastsnap: VERIFY OK - reset %" PRId64 " us, oracle %"
-                   PRId64 " us over %" PRIu64 " bytes, in one bottom half\n",
-                   rus, dus, checked);
+                   PRId64 " us over %" PRIu64 " bytes, %d device sections "
+                   "differ, in one bottom half\n",
+                   rus, dus, checked,
+                   penguin_fastsnap_dev_diff_sections());
         }
     }
 
@@ -1087,6 +1103,132 @@ static int fastsnap_selftest_loop(void)
     fastsnap_await(penguin_fastsnap_seq() + 1);
     penguin_fastsnap_schedule(PENGUIN_FASTSNAP_RAM_RELEASE);
     fastsnap_await(penguin_fastsnap_seq() + 1);
+    return failures;
+}
+
+/*
+ * Phase 8: the device allowlist, and the oracle that has to be able to catch it.
+ *
+ * The allowlist is the largest lever on reset cost -- measured, a full block is
+ * an order of magnitude more expensive than {cpu, timer} -- and the only one
+ * whose failure mode is silence. A section left out of the block is not
+ * restored, nothing reports it, and the guest misbehaves some thousands of
+ * iterations later with nothing pointing back at the configuration.
+ *
+ * penguin_fastsnap_dev_diff_sections() is what makes it checkable, so this
+ * phase is mostly about proving that number is not blind. Phase 7 has already
+ * shown a full-block reset scores zero. Here a section is deliberately dropped
+ * from the block and then dirtied, and the count MUST rise and MUST name it.
+ * Without this pairing, a zero from a scoped reset is indistinguishable from an
+ * oracle that never looks -- which is the failure this lane has now produced
+ * often enough to design against rather than hope about.
+ */
+static int fastsnap_selftest_allowlist(void)
+{
+    uint32_t poke = 0xfeedfaceU, imsc = FASTSNAP_IMSC_VALUE;
+    char *pl011_id = NULL;
+    GString *csv;
+    uint64_t seq;
+    char **all;
+    int failures = 0;
+    int i, n;
+
+    all = device_list_all();
+    csv = g_string_new(NULL);
+    for (n = 0; all[n]; n++) {
+        if (strstr(all[n], "pl011")) {
+            pl011_id = g_strdup(all[n]);
+            continue;               /* the one section left out */
+        }
+        g_string_append_printf(csv, "%s%s", csv->len ? "," : "", all[n]);
+    }
+    g_free(all);
+
+    if (!pl011_id) {
+        /* Not a failure: a machine without a PL011 has nothing to drop that
+         * this phase knows how to dirty on demand. Say so rather than
+         * reporting a pass for a check that did not run. */
+        printf("fastsnap: allowlist phase SKIPPED - no pl011 section on this "
+               "machine to leave out of the block\n");
+        g_string_free(csv, TRUE);
+        return 0;
+    }
+
+    penguin_fastsnap_set_allowlist(csv->str);
+    g_string_free(csv, TRUE);
+
+    seq = penguin_fastsnap_seq();
+    penguin_fastsnap_schedule(PENGUIN_FASTSNAP_LOOP_ARM);
+    if (fastsnap_await(seq + 1) || penguin_fastsnap_last_rc() != 0) {
+        printf("fastsnap: FAIL - loop arm with an allowlist did not "
+               "complete\n");
+        penguin_fastsnap_set_allowlist(NULL);
+        g_free(pl011_id);
+        return 1;
+    }
+    printf("fastsnap: allowlist block covers %d of %d sections, %" PRIu64
+           " bytes, armed in %" PRId64 " us\n",
+           n - 1, n, penguin_fastsnap_block_size(),
+           penguin_fastsnap_last_us());
+
+    /* Dirty both halves, including the section that is NOT in the block. */
+    for (i = 0; i < 6; i++) {
+        address_space_write(&address_space_memory,
+                            FASTSNAP_RAM_PROBE + (hwaddr)i * 0x10000,
+                            MEMTXATTRS_UNSPECIFIED, &poke, sizeof(poke));
+    }
+    address_space_write(&address_space_memory,
+                        FASTSNAP_UART0_BASE + FASTSNAP_PL011_IMSC,
+                        MEMTXATTRS_UNSPECIFIED, &imsc, sizeof(imsc));
+
+    seq = penguin_fastsnap_seq();
+    penguin_fastsnap_schedule(PENGUIN_FASTSNAP_LOOP_RESET_VERIFY);
+    if (fastsnap_await(seq + 1) || penguin_fastsnap_last_rc() != 0) {
+        printf("fastsnap: FAIL - scoped reset+verify did not complete\n");
+        failures++;
+    } else {
+        int64_t dpages = (int64_t)penguin_fastsnap_diff_pages();
+        int ndev = penguin_fastsnap_dev_diff_sections();
+        const char *report = penguin_fastsnap_dev_diff_report();
+
+        /* RAM is unaffected by device scoping, so this must still be clean --
+         * if it is not, the allowlist broke something it has no business
+         * touching. */
+        if (dpages != 0) {
+            printf("fastsnap: FAIL - a device allowlist changed the RAM "
+                   "result: %" PRId64 " pages differ (at %s)\n", dpages,
+                   penguin_fastsnap_diff_report());
+            failures++;
+        }
+        if (ndev < 0) {
+            printf("fastsnap: FAIL - the device oracle could not compare "
+                   "(%d); a scoped reset cannot be scored\n", ndev);
+            failures++;
+        } else if (ndev == 0) {
+            printf("fastsnap: CONTROL FAILED - '%s' was left out of the block "
+                   "and then written to, and the device oracle still reports "
+                   "0 sections differing. A clean score for any allowlist "
+                   "would prove nothing.\n", pl011_id);
+            failures++;
+        } else if (!strstr(report, pl011_id)) {
+            printf("fastsnap: FAIL - the device oracle reports %d sections "
+                   "differing (%s) but not '%s', which is the one that was "
+                   "dropped and dirtied\n", ndev, report, pl011_id);
+            failures++;
+        } else {
+            printf("fastsnap: ALLOWLIST OK - reset %" PRId64 " us over %d "
+                   "sections, RAM clean, and the oracle names the dropped "
+                   "section: %d differ (%s)\n",
+                   penguin_fastsnap_last_us(), n - 1, ndev, report);
+        }
+    }
+
+    penguin_fastsnap_schedule(PENGUIN_FASTSNAP_FORK_DROP);
+    fastsnap_await(penguin_fastsnap_seq() + 1);
+    penguin_fastsnap_schedule(PENGUIN_FASTSNAP_RAM_RELEASE);
+    fastsnap_await(penguin_fastsnap_seq() + 1);
+    penguin_fastsnap_set_allowlist(NULL);
+    g_free(pl011_id);
     return failures;
 }
 
@@ -1116,6 +1258,15 @@ static void fastsnap_selftest_run(Notifier *n, void *opaque)
     /* If the iterative-handler predicate silently excluded nothing, the block
      * would contain RAM and be megabytes rather than kilobytes. */
     printf("fastsnap: %d device sections kept\n", nkept);
+    /*
+     * Printed in full because the ids are NOT unique -- -M virt registers two
+     * called "pflash_cfi01" -- and every list-shaped thing built on top of them
+     * (allowlists, denylists, the per-section device oracle) has to be written
+     * knowing that. It cost one false positive to learn.
+     */
+    for (int k = 0; k < nkept; k++) {
+        printf("fastsnap:   section[%d] %s\n", k, kept[k]);
+    }
     g_free(kept);
 
     if (!have_pl011) {
@@ -1211,6 +1362,7 @@ static void fastsnap_on_running(void *opaque, bool running, RunState state)
     failures += fastsnap_selftest_fork_oracle();
     failures += fastsnap_selftest_dirty_track();
     failures += fastsnap_selftest_loop();
+    failures += fastsnap_selftest_allowlist();
     printf("fastsnap: SELFTEST %s\n", failures ? "FAILED" : "PASSED");
     fflush(stdout);
     /* _exit, not exit: returning through QEMU's atexit teardown from a
