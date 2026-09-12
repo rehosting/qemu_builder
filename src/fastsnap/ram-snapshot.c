@@ -151,6 +151,16 @@ static const FastsnapRamCopy *ram_copy_for(const char *idstr)
  * exactly as upstream has them: if the block is not word-aligned the general
  * function is correct and this shortcut is not, so it defers rather than
  * guessing.
+ *
+ * ON THE TARGET_PAGE_BITS HERE vs qemu_target_page_size() IN THE RESTORE LOOP.
+ * They look like two different answers to the same question and they are not,
+ * so this note exists to stop the "inconsistency" being fixed into a real one.
+ * qemu_target_page_size() is a static inline over TARGET_PAGE_SIZE, which is
+ * defined in terms of TARGET_PAGE_BITS in the same header; and these files
+ * build in system_ss, which is not COMPILING_PER_TARGET, so both resolve to the
+ * runtime target_page.bits rather than to a per-target constant. The bitmap
+ * walk and the page loop therefore cannot disagree, on any target, including
+ * the ones where the page size varies at runtime.
  */
 static uint64_t fastsnap_dirty_take(RAMBlock *block, unsigned long *bmap)
 {
