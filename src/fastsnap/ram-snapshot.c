@@ -47,6 +47,38 @@ static int ram_ncopies;
 static uint64_t ram_snapshot_bytes;
 static uint64_t ram_restored_pages;
 
+/*
+ * MEASUREMENT ONLY, and off unless asked for.
+ *
+ * FASTSNAP_TB_SKIP_NOCODE=1 skips tb_invalidate_phys_range() for restored
+ * pages whose DIRTY_MEMORY_CODE bit is set -- pages tlb_protect_code() says
+ * hold no translated blocks, which is the test accel/tcg/cputlb.c makes before
+ * its own invalidation in the notdirty write path.
+ *
+ * It is a knob and not the default because the evidence against it turned out
+ * to be evidence about the host. A first A/B convicted it -- every lap of 4,000
+ * ending in a fatal signal against 60 without it -- and the same signature was
+ * later produced on this target by nothing but a busy machine, on a run that
+ * followed a long build. The honest state of the question is therefore OPEN,
+ * and the shipped behaviour is the one that cannot be wrong.
+ */
+static int tb_skip_nocode = -1;
+
+static bool fastsnap_tb_skip_nocode(void)
+{
+    if (tb_skip_nocode < 0) {
+        const char *e = getenv("FASTSNAP_TB_SKIP_NOCODE");
+        tb_skip_nocode = (e && *e == '1') ? 1 : 0;
+        if (tb_skip_nocode) {
+            error_report("fastsnap: FASTSNAP_TB_SKIP_NOCODE=1 -- skipping "
+                         "translation-block invalidation for restored pages "
+                         "QEMU reports as holding no code. MEASUREMENT ONLY; "
+                         "whether this is safe is an open question.");
+        }
+    }
+    return tb_skip_nocode != 0;
+}
+
 uint64_t fastsnap_ram_snapshot_bytes(void) { return ram_snapshot_bytes; }
 uint64_t fastsnap_ram_restored_pages(void) { return ram_restored_pages; }
 bool fastsnap_ram_snapshot_present(void) { return ram_ncopies > 0; }
@@ -285,11 +317,9 @@ int64_t fastsnap_ram_restore(void)
 
                 memcpy(block->host + off, copy->data + off, len);
                 /*
-                 * DO NOT GUARD THIS ON DIRTY_MEMORY_CODE. It is the obvious
-                 * optimisation, accel/tcg/cputlb.c appears to bless it, and it
-                 * destroys the guest. Written down because the reasoning that
-                 * leads there is sound-looking and will occur to the next
-                 * reader:
+                 * ON GUARDING THIS WITH DIRTY_MEMORY_CODE -- an OPEN question,
+                 * and a cautionary one. The obvious optimisation is to skip
+                 * the call for pages QEMU says hold no translated blocks:
                  *
                  *   tlb_protect_code() CLEARS the CODE dirty bit when a block
                  *   is translated on a page, so a SET bit reads as "no code
@@ -297,19 +327,25 @@ int64_t fastsnap_ram_restore(void)
                  *   write path does exactly that test before its own
                  *   tb_invalidate_phys_range_fast().
                  *
-                 * Measured with that guard in place: every one of 4,000
-                 * fuzzing laps ended in a fatal signal, against 60 without it.
-                 * The guest executes stale translations and faults. The
-                 * predicate is valid where upstream uses it -- at a write
+                 * A first A/B appeared to convict it: with the skip in
+                 * place every one of 4,000 fuzzing laps ended in a fatal
+                 * signal, against 60 without it. That result did not hold up.
+                 * The identical signature -- nearly every lap closing on a
+                 * signal, inputs delivered down several-fold -- was later
+                 * produced on this same target by nothing but a loaded host,
+                 * twice, and the run that convicted the skip had followed a
+                 * fifty-minute build. So the question is OPEN, not settled,
+                 * and FASTSNAP_TB_SKIP_NOCODE exists to settle it with an
+                 * interleaved A/B on an idle machine.
+                 *
+                 * There is a real reason for suspicion beyond that run: the
+                 * predicate is valid where upstream uses it, at a write
                  * arriving through a TLB entry marked TLB_NOTDIRTY, which is
-                 * what makes the bit meaningful at that instant -- and is not
-                 * valid here, with the vCPUs stopped and after
-                 * fastsnap_dirty_take() has swept tlb_reset_dirty_range_all()
-                 * across the whole block. A counter built on the same
-                 * predicate reported ZERO code pages on every lap while
-                 * skipping invalidation on those very pages wrecked the guest:
-                 * the two facts together are the proof that the bit does not
-                 * mean here what it looks like it means.
+                 * what makes the bit meaningful at that instant. Here the
+                 * vCPUs are stopped and fastsnap_dirty_take() has just swept
+                 * tlb_reset_dirty_range_all() across the whole block. Whether
+                 * the bit still means what it looks like it means in that
+                 * context is exactly what has not been established.
                  *
                  * Note what did NOT catch it. The fork oracle called the guest
                  * byte-identical on all 160 verifications of the broken run.
@@ -331,8 +367,14 @@ int64_t fastsnap_ram_restore(void)
                  * catch that; the penguin image build did.
                  */
                 if (tcg_enabled()) {
-                    tb_invalidate_phys_range(NULL, block->offset + off,
-                                             block->offset + off + len - 1);
+                    bool nocode = fastsnap_tb_skip_nocode() &&
+                        physical_memory_get_dirty_flag(block->offset + off,
+                                                       DIRTY_MEMORY_CODE);
+
+                    if (!nocode) {
+                        tb_invalidate_phys_range(NULL, block->offset + off,
+                                                 block->offset + off + len - 1);
+                    }
                 }
                 restored++;
                 bit++;
