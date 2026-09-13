@@ -82,6 +82,8 @@ stdenv.mkDerivation {
       --target-list=x86_64-softmmu \
       --disable-tcg \
       --enable-kvm \
+      --disable-modules \
+      --extra-cflags=-fPIC \
       --disable-docs \
       --disable-tools \
       --disable-guest-agent \
@@ -94,28 +96,85 @@ stdenv.mkDerivation {
     runHook postConfigure
   '';
 
+  # --disable-modules AND --extra-cflags=-fPIC are load-bearing, and finding
+  # that out is why this file is worth having. Without them the .so links and
+  # exports NOTHING of the fastsnap ABI: QEMU's module support builds with
+  # hidden visibility behind an explicit export list, and penguin_fastsnap_* is
+  # not on it. The shipped artifact passes both (configs/default.json), so it
+  # exports all 26 -- verified directly against
+  # /usr/local/lib/libqemu-kvm-x86_64.so in the penguin image.
+  #
+  # That is the standing hazard with this file: it hand-rolls a configure
+  # rather than reusing configs/default.json's configureArgs the way build.sh
+  # does, so it can diverge from the shipped configuration and then fail (or
+  # worse, pass) for reasons that have nothing to do with fastsnap. Reusing the
+  # profile here needs the profile's nixDeps in buildInputs; until then, these
+  # two flags are the ones that matter and this comment is the reason.
+
+  # THE SHARED LIBRARY, not the executable, and the difference is the whole
+  # check. The first version of this file ninja'd qemu-system-x86_64 and then
+  # failed its own symbol gate -- correctly. fastsnap's objects land in
+  # libsystem.a, nothing inside QEMU references penguin_fastsnap_*, and a
+  # static archive contributes only the objects that resolve an undefined
+  # symbol, so the ABI is absent from any executable by construction. It is
+  # present in the .so because that is linked whole and exported, and the .so
+  # is what penguin dlopens. build.sh names this exact target.
+  #
+  # Written, wired into the flake, and never run for two weeks; the first run
+  # failed. That is the argument for running a check before believing it.
   buildPhase = ''
     runHook preBuild
-    ninja qemu-system-x86_64
+    ninja libqemu-kvm-x86_64.so
     runHook postBuild
   '';
 
   doCheck = true;
   checkPhase = ''
     runHook preCheck
-    test -x qemu-system-x86_64 || { echo "FAIL: no binary" >&2; exit 1; }
+    lib=libqemu-kvm-x86_64.so
+    test -f "$lib" || { echo "FAIL: no $lib" >&2; exit 1; }
     # Linking is the assertion, but assert the fastsnap ABI is actually IN the
-    # binary too: a configuration that quietly dropped src/fastsnap from the
+    # library too: a configuration that quietly dropped src/fastsnap from the
     # build would link just as happily and prove nothing.
+    #
+    # nm -D: the DYNAMIC table. Penguin reaches these through dlsym, so a
+    # symbol present only in .symtab is not reachable and a gate that accepted
+    # one would pass a library the loader cannot use.
     for sym in penguin_fastsnap_schedule penguin_fastsnap_set_allowlist \
                penguin_fastsnap_dev_diff_sections; do
-      nm -C qemu-system-x86_64 | grep -q " $sym\$" || {
-        echo "FAIL: $sym is not in a --disable-tcg build; this gate would" >&2
-        echo "      pass on a build that does not contain fastsnap at all" >&2
+      # awk to the last field + grep -qx, the same shape check-delta-present.sh
+      # uses. The obvious end-of-line anchored grep does NOT work here: inside
+      # a nix indented-string literal the backslash survives into the shell,
+      # double quotes then turn the escaped dollar into a literal one, and the
+      # anchor becomes a dollar CHARACTER. The check failed twice on a library
+      # that exports all 26 symbols, with the diagnostics printing
+      # "penguin_fastsnap in .dynsym: 26" directly underneath the FAIL.
+      # (Writing that explanation with the quotes spelled out closed the
+      # string literal and broke the file, which is the same joke twice.)
+      nm -D --defined-only "$lib" |
+        awk -v s="$sym" '{n=$NF; sub(/@.*/, "", n); if (n == s) f=1}
+                         END {exit !f}' || {
+        echo "FAIL: $sym is not exported from a --disable-tcg $lib." >&2
+        # Say WHICH of the three things went wrong, because they have three
+        # different fixes and a bare FAIL cost two rebuilds to narrow down.
+        echo "  penguin_fastsnap in .dynsym: $(nm -D --defined-only "$lib" \
+              2>/dev/null | grep -c penguin_fastsnap)" >&2
+        echo "  penguin_fastsnap in .symtab: $(nm --defined-only "$lib" \
+              2>/dev/null | grep -c penguin_fastsnap)" >&2
+        echo "  total .dynsym entries: $(nm -D --defined-only "$lib" \
+              2>/dev/null | wc -l)" >&2
+        echo "  what nm actually calls them:" >&2
+        nm -D --defined-only "$lib" | grep penguin_fastsnap | head -4 >&2 || true
+        echo "  version script / dynamic list on the link line:" >&2
+        grep -o -- '-Wl,--\(version-script\|dynamic-list\)[^ ]*' \
+             build.ninja 2>/dev/null | sort -u | head -5 >&2 || true
+        echo "  NOTE: the SHIPPED libqemu-kvm-x86_64.so exports all 26, so a" >&2
+        echo "  failure here is this check diverging from build.sh's" >&2
+        echo "  configure, not fastsnap being unavailable under KVM." >&2
         exit 1
       }
     done
-    echo "PASS: fastsnap links and is present with CONFIG_TCG off"
+    echo "PASS: fastsnap links into $lib and is exported with CONFIG_TCG off"
     runHook postCheck
   '';
 
