@@ -786,14 +786,6 @@ penguin_fastsnap_ram_restored_pages(void)
     return fastsnap_ram_restored_pages();
 }
 
-/* Of the pages the last reset restored, how many held translated code. The
- * rest were data, and invalidating them was work with no effect. */
-uint64_t __attribute__((visibility("default")))
-penguin_fastsnap_ram_restored_code_pages(void)
-{
-    return fastsnap_ram_restored_code_pages();
-}
-
 uint64_t __attribute__((visibility("default")))
 penguin_fastsnap_ram_snapshot_bytes(void)
 {

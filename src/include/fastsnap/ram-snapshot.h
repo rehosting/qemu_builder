@@ -21,6 +21,5 @@ void fastsnap_ram_snapshot_release(void);
 bool fastsnap_ram_snapshot_present(void);
 uint64_t fastsnap_ram_snapshot_bytes(void);
 uint64_t fastsnap_ram_restored_pages(void);
-uint64_t fastsnap_ram_restored_code_pages(void);
 
 #endif /* FASTSNAP_RAM_SNAPSHOT_H */

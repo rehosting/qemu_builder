@@ -32,7 +32,6 @@
 #include "qemu/cutils.h"
 #include "qemu/host-utils.h"
 #include "system/memory.h"
-#include "system/physmem.h"
 
 #include "fastsnap/ram-snapshot.h"
 #include "fastsnap/dirty-track.h"
@@ -47,58 +46,9 @@ static FastsnapRamCopy *ram_copies;
 static int ram_ncopies;
 static uint64_t ram_snapshot_bytes;
 static uint64_t ram_restored_pages;
-static uint64_t ram_restored_code_pages;
-static int tb_guard = -1;   /* -1 = not yet read from the environment */
 
 uint64_t fastsnap_ram_snapshot_bytes(void) { return ram_snapshot_bytes; }
 uint64_t fastsnap_ram_restored_pages(void) { return ram_restored_pages; }
-
-/*
- * Of the pages the last restore put back, how many actually held translated
- * code.
- *
- * Measured, a reset's cost does not end when the reset does: on a bugbench
- * lap the guest takes ~24 us per restored page to get back to the next
- * detector hit, which is two orders of magnitude more than the 4 KB memcpy
- * that is on the reset's own clock. The obvious suspect is the one piece of
- * per-page work whose CONSEQUENCE lands after the vCPUs resume -- killing a
- * page's translated blocks so the guest has to build them again.
- *
- * This counter is what makes that checkable rather than plausible. If a lap
- * restores 25 pages and two of them held code, re-translation cannot be
- * costing 24 us across all 25, and the suspect is wrong.
- */
-uint64_t fastsnap_ram_restored_code_pages(void) { return ram_restored_code_pages; }
-
-/*
- * Whether to skip invalidation for pages QEMU already knows hold no code.
- *
- * DIRTY_MEMORY_CODE is set for a page with no translated blocks and cleared by
- * tlb_protect_code() when one is created, so "flag set" means there is nothing
- * to invalidate and the call is a no-op. accel/tcg/cputlb.c makes exactly this
- * test before its own tb_invalidate_phys_range_fast() in the notdirty write
- * path; this restore loop was calling unconditionally, which is a divergence
- * from the upstream idiom at the analogous site rather than a deliberate
- * choice.
- *
- * On by default because it is semantically equivalent. FASTSNAP_TB_GUARD=0
- * restores the unconditional call, which exists so the cost can be attributed
- * by A/B rather than argued: if turning the guard off does not move the
- * post-resume time, the invalidation was never what that time was.
- */
-static bool fastsnap_tb_guard(void)
-{
-    if (tb_guard < 0) {
-        const char *e = getenv("FASTSNAP_TB_GUARD");
-        tb_guard = (e && *e == '0') ? 0 : 1;
-        if (!tb_guard) {
-            error_report("fastsnap: FASTSNAP_TB_GUARD=0 -- invalidating every "
-                         "restored page whether or not it holds translated "
-                         "code. This is a measurement setting.");
-        }
-    }
-    return tb_guard != 0;
-}
 bool fastsnap_ram_snapshot_present(void) { return ram_ncopies > 0; }
 
 void fastsnap_ram_snapshot_release(void)
@@ -283,7 +233,7 @@ int64_t fastsnap_ram_restore(void)
 {
     RAMBlock *block;
     size_t psize = qemu_target_page_size();
-    uint64_t restored = 0, code_pages = 0;
+    uint64_t restored = 0;
 
     if (!ram_ncopies) {
         error_report("fastsnap: RAM restore with no snapshot taken");
@@ -335,6 +285,42 @@ int64_t fastsnap_ram_restore(void)
 
                 memcpy(block->host + off, copy->data + off, len);
                 /*
+                 * DO NOT GUARD THIS ON DIRTY_MEMORY_CODE. It is the obvious
+                 * optimisation, accel/tcg/cputlb.c appears to bless it, and it
+                 * destroys the guest. Written down because the reasoning that
+                 * leads there is sound-looking and will occur to the next
+                 * reader:
+                 *
+                 *   tlb_protect_code() CLEARS the CODE dirty bit when a block
+                 *   is translated on a page, so a SET bit reads as "no code
+                 *   here, nothing to invalidate" -- and cputlb.c's notdirty
+                 *   write path does exactly that test before its own
+                 *   tb_invalidate_phys_range_fast().
+                 *
+                 * Measured with that guard in place: every one of 4,000
+                 * fuzzing laps ended in a fatal signal, against 60 without it.
+                 * The guest executes stale translations and faults. The
+                 * predicate is valid where upstream uses it -- at a write
+                 * arriving through a TLB entry marked TLB_NOTDIRTY, which is
+                 * what makes the bit meaningful at that instant -- and is not
+                 * valid here, with the vCPUs stopped and after
+                 * fastsnap_dirty_take() has swept tlb_reset_dirty_range_all()
+                 * across the whole block. A counter built on the same
+                 * predicate reported ZERO code pages on every lap while
+                 * skipping invalidation on those very pages wrecked the guest:
+                 * the two facts together are the proof that the bit does not
+                 * mean here what it looks like it means.
+                 *
+                 * Note what did NOT catch it. The fork oracle called the guest
+                 * byte-identical on all 160 verifications of the broken run.
+                 * It compares memory, and memory was perfect; the damage was
+                 * the guest executing code no longer in its RAM -- the exact
+                 * failure this file's header warns about, observed.
+                 *
+                 * And it would buy nothing. Measured within one run over 3,785
+                 * laps, post-resume cost is 0.81 us per restored page against a
+                 * 631 us fixed term. The invalidation is not where time goes.
+                 *
                  * tcg_enabled() folds to a compile-time false in a build
                  * without CONFIG_TCG, which removes the call entirely -- the
                  * same idiom system/physmem.c uses, and it is load-bearing
@@ -345,19 +331,8 @@ int64_t fastsnap_ram_restore(void)
                  * catch that; the penguin image build did.
                  */
                 if (tcg_enabled()) {
-                    /* Cleared by tlb_protect_code() when a TB is built on this
-                     * page, so a SET flag means there is no code here and
-                     * nothing to invalidate. Counted either way. */
-                    bool has_code = !physical_memory_get_dirty_flag(
-                        block->offset + off, DIRTY_MEMORY_CODE);
-
-                    if (has_code) {
-                        code_pages++;
-                    }
-                    if (has_code || !fastsnap_tb_guard()) {
-                        tb_invalidate_phys_range(NULL, block->offset + off,
-                                                 block->offset + off + len - 1);
-                    }
+                    tb_invalidate_phys_range(NULL, block->offset + off,
+                                             block->offset + off + len - 1);
                 }
                 restored++;
                 bit++;
@@ -367,6 +342,5 @@ int64_t fastsnap_ram_restore(void)
     }
 
     ram_restored_pages = restored;
-    ram_restored_code_pages = code_pages;
     return (int64_t)restored;
 }

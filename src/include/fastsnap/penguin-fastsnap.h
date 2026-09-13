@@ -226,7 +226,6 @@ uint64_t penguin_fastsnap_last_ram_digest(void);
 uint64_t penguin_fastsnap_diff_pages(void);
 int64_t penguin_fastsnap_diff_us(void);
 uint64_t penguin_fastsnap_ram_restored_pages(void);
-uint64_t penguin_fastsnap_ram_restored_code_pages(void);
 uint64_t penguin_fastsnap_ram_snapshot_bytes(void);
 uint64_t penguin_fastsnap_diff_bytes_checked(void);
 const char *penguin_fastsnap_diff_report(void);
