@@ -32,6 +32,7 @@
 #include "qemu/cutils.h"
 #include "qemu/host-utils.h"
 #include "system/memory.h"
+#include "system/physmem.h"
 
 #include "fastsnap/ram-snapshot.h"
 #include "fastsnap/dirty-track.h"
@@ -46,9 +47,58 @@ static FastsnapRamCopy *ram_copies;
 static int ram_ncopies;
 static uint64_t ram_snapshot_bytes;
 static uint64_t ram_restored_pages;
+static uint64_t ram_restored_code_pages;
+static int tb_guard = -1;   /* -1 = not yet read from the environment */
 
 uint64_t fastsnap_ram_snapshot_bytes(void) { return ram_snapshot_bytes; }
 uint64_t fastsnap_ram_restored_pages(void) { return ram_restored_pages; }
+
+/*
+ * Of the pages the last restore put back, how many actually held translated
+ * code.
+ *
+ * Measured, a reset's cost does not end when the reset does: on a bugbench
+ * lap the guest takes ~24 us per restored page to get back to the next
+ * detector hit, which is two orders of magnitude more than the 4 KB memcpy
+ * that is on the reset's own clock. The obvious suspect is the one piece of
+ * per-page work whose CONSEQUENCE lands after the vCPUs resume -- killing a
+ * page's translated blocks so the guest has to build them again.
+ *
+ * This counter is what makes that checkable rather than plausible. If a lap
+ * restores 25 pages and two of them held code, re-translation cannot be
+ * costing 24 us across all 25, and the suspect is wrong.
+ */
+uint64_t fastsnap_ram_restored_code_pages(void) { return ram_restored_code_pages; }
+
+/*
+ * Whether to skip invalidation for pages QEMU already knows hold no code.
+ *
+ * DIRTY_MEMORY_CODE is set for a page with no translated blocks and cleared by
+ * tlb_protect_code() when one is created, so "flag set" means there is nothing
+ * to invalidate and the call is a no-op. accel/tcg/cputlb.c makes exactly this
+ * test before its own tb_invalidate_phys_range_fast() in the notdirty write
+ * path; this restore loop was calling unconditionally, which is a divergence
+ * from the upstream idiom at the analogous site rather than a deliberate
+ * choice.
+ *
+ * On by default because it is semantically equivalent. FASTSNAP_TB_GUARD=0
+ * restores the unconditional call, which exists so the cost can be attributed
+ * by A/B rather than argued: if turning the guard off does not move the
+ * post-resume time, the invalidation was never what that time was.
+ */
+static bool fastsnap_tb_guard(void)
+{
+    if (tb_guard < 0) {
+        const char *e = getenv("FASTSNAP_TB_GUARD");
+        tb_guard = (e && *e == '0') ? 0 : 1;
+        if (!tb_guard) {
+            error_report("fastsnap: FASTSNAP_TB_GUARD=0 -- invalidating every "
+                         "restored page whether or not it holds translated "
+                         "code. This is a measurement setting.");
+        }
+    }
+    return tb_guard != 0;
+}
 bool fastsnap_ram_snapshot_present(void) { return ram_ncopies > 0; }
 
 void fastsnap_ram_snapshot_release(void)
@@ -233,7 +283,7 @@ int64_t fastsnap_ram_restore(void)
 {
     RAMBlock *block;
     size_t psize = qemu_target_page_size();
-    uint64_t restored = 0;
+    uint64_t restored = 0, code_pages = 0;
 
     if (!ram_ncopies) {
         error_report("fastsnap: RAM restore with no snapshot taken");
@@ -295,8 +345,19 @@ int64_t fastsnap_ram_restore(void)
                  * catch that; the penguin image build did.
                  */
                 if (tcg_enabled()) {
-                    tb_invalidate_phys_range(NULL, block->offset + off,
-                                             block->offset + off + len - 1);
+                    /* Cleared by tlb_protect_code() when a TB is built on this
+                     * page, so a SET flag means there is no code here and
+                     * nothing to invalidate. Counted either way. */
+                    bool has_code = !physical_memory_get_dirty_flag(
+                        block->offset + off, DIRTY_MEMORY_CODE);
+
+                    if (has_code) {
+                        code_pages++;
+                    }
+                    if (has_code || !fastsnap_tb_guard()) {
+                        tb_invalidate_phys_range(NULL, block->offset + off,
+                                                 block->offset + off + len - 1);
+                    }
                 }
                 restored++;
                 bit++;
@@ -306,5 +367,6 @@ int64_t fastsnap_ram_restore(void)
     }
 
     ram_restored_pages = restored;
+    ram_restored_code_pages = code_pages;
     return (int64_t)restored;
 }

@@ -982,10 +982,30 @@ static int fastsnap_selftest_loop(void)
         return failures + 1;
     }
     printf("fastsnap: loop reset %" PRId64 " us, %" PRIu64 " RAM pages "
-           "restored of %" PRIu64 " bytes snapshotted\n",
+           "restored (%" PRIu64 " holding code) of %" PRIu64
+           " bytes snapshotted\n",
            penguin_fastsnap_last_us(),
            penguin_fastsnap_ram_restored_pages(),
+           penguin_fastsnap_ram_restored_code_pages(),
            penguin_fastsnap_ram_snapshot_bytes());
+    /*
+     * A bound, not a control, and the difference matters. This phase restores
+     * six pages this file poked with address_space_write() and never executed,
+     * so zero is the expected answer and a broken counter that always returned
+     * zero would agree. The real control for this number is the A/B in the
+     * loop harness -- run with FASTSNAP_TB_GUARD=0 and see whether the
+     * post-resume time moves -- because that is a question about consequences
+     * and this machine has no workload to have them on.
+     */
+    if (penguin_fastsnap_ram_restored_code_pages() >
+        penguin_fastsnap_ram_restored_pages()) {
+        printf("fastsnap: FAIL - %" PRIu64 " restored pages hold code out of "
+               "%" PRIu64 " restored; the code-page counter is not counting "
+               "restored pages\n",
+               penguin_fastsnap_ram_restored_code_pages(),
+               penguin_fastsnap_ram_restored_pages());
+        failures++;
+    }
 
     seq = penguin_fastsnap_seq();
     penguin_fastsnap_schedule(PENGUIN_FASTSNAP_FORK_DIFF);
