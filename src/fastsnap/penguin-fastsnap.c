@@ -804,6 +804,36 @@ penguin_fastsnap_diff_report(void)
     return fastsnap_fork_report();
 }
 
+/* HOW the last comparison reached its answer, not just what it was.
+ *
+ * `proved` pages were shown equal by PFN identity -- parent and child still
+ * share the frame, which the kernel guarantees means identical bytes -- and
+ * were never read. `read` pages went through process_vm_readv and memcmp.
+ * "281 MB byte-identical" means something different when 99.97% of it was
+ * proven rather than compared, and a verdict that quotes the first number
+ * without the second is hiding the mechanism that produced it.
+ *
+ * `pagemap_status` is 1 active, 0 off by env, -1 unavailable (PFNs read as
+ * zero without CAP_SYS_ADMIN). -1 with the filter asked for is the case worth
+ * surfacing: the oracle then costs slightly MORE and nothing else changes. */
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_diff_pages_proved(void)
+{
+    return fastsnap_fork_pages_proved();
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_diff_pages_read(void)
+{
+    return fastsnap_fork_pages_read();
+}
+
+int __attribute__((visibility("default")))
+penguin_fastsnap_diff_pagemap_status(void)
+{
+    return fastsnap_fork_pagemap_status();
+}
+
 uint64_t __attribute__((visibility("default")))
 penguin_fastsnap_dirty_pages(void)
 {

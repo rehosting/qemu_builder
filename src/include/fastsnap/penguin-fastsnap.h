@@ -229,6 +229,14 @@ uint64_t penguin_fastsnap_ram_restored_pages(void);
 uint64_t penguin_fastsnap_ram_snapshot_bytes(void);
 uint64_t penguin_fastsnap_diff_bytes_checked(void);
 const char *penguin_fastsnap_diff_report(void);
+
+/* How the last fork-oracle comparison reached its answer: pages proven equal
+ * by PFN identity (never read) and pages actually read back and compared.
+ * pagemap_status: 1 active, 0 disabled by FASTSNAP_FORK_PAGEMAP, -1
+ * unavailable -- PFNs read as zero without CAP_SYS_ADMIN. */
+uint64_t penguin_fastsnap_diff_pages_proved(void);
+uint64_t penguin_fastsnap_diff_pages_read(void);
+int penguin_fastsnap_diff_pagemap_status(void);
 uint64_t penguin_fastsnap_dirty_pages(void);
 uint64_t penguin_fastsnap_dirty_pages_scanned(void);
 uint64_t penguin_fastsnap_dirty_page_size(void);

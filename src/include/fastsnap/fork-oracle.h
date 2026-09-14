@@ -26,4 +26,18 @@ uint64_t fastsnap_fork_diff_pages(void);
 uint64_t fastsnap_fork_bytes_checked(void);
 const char *fastsnap_fork_report(void);
 
+/* How the last comparison reached its answer. `proved` pages were shown equal
+ * by PFN identity (a kernel guarantee) and never read; `read` pages went
+ * through process_vm_readv and memcmp. They sum to the pages covered. A caller
+ * reporting a clean oracle should report these too: "281 MB identical" means
+ * something different when 99.97% of it was proven rather than compared, and a
+ * reader is entitled to know which. */
+uint64_t fastsnap_fork_pages_proved(void);
+uint64_t fastsnap_fork_pages_read(void);
+
+#define FASTSNAP_PAGEMAP_OFF          0   /* disabled by env */
+#define FASTSNAP_PAGEMAP_ACTIVE       1   /* PFNs readable, filter engaged */
+#define FASTSNAP_PAGEMAP_UNAVAILABLE (-1) /* no CAP_SYS_ADMIN, or no pagemap */
+int fastsnap_fork_pagemap_status(void);
+
 #endif /* FASTSNAP_FORK_ORACLE_H */

@@ -45,6 +45,7 @@
  * up in the block. */
 #define FASTSNAP_UART0_BASE  0x09000000ULL
 #define FASTSNAP_PL011_IMSC  0x38
+#define FASTSNAP_PAGEMAP_ACTIVE_ST 1
 #define FASTSNAP_IMSC_VALUE  0x7ffU
 
 /* hw/arm/virt.c memmap: VIRT_MEM. 1 MB in, clear of the board's own setup. */
@@ -973,6 +974,63 @@ static int fastsnap_selftest_loop(void)
     } else {
         printf("fastsnap: control OK - oracle sees the disturbance "
                "(%" PRId64 " pages differ)\n", d1);
+    }
+
+    /*
+     * THE PREFILTER MUST NOT CHANGE THE ANSWER -- checked HERE, on a state
+     * that has differences, and not after the reset where the answer is zero.
+     * Agreeing on zero is worth nothing: a filter that skipped every page
+     * would agree on zero. It has to agree on SIX.
+     *
+     * The filter skips a page only when parent and child still share its
+     * physical frame, which the kernel guarantees means identical bytes. Every
+     * uncertainty -- not present, swapped, a PFN that reads zero -- resolves
+     * to "compare it", so it can only ever do extra work. This asserts that
+     * property rather than trusting the argument for it.
+     *
+     * Strength depends on where this runs. PFNs read as zero without
+     * CAP_SYS_ADMIN, and a nix build sandbox has none, so there the filter
+     * reports UNAVAILABLE and this proves only that the path is harmless. Run
+     * with the capability and it proves the real thing, which is why the
+     * status is printed rather than assumed.
+     */
+    {
+        int st_on = penguin_fastsnap_diff_pagemap_status();
+        uint64_t proved_on = penguin_fastsnap_diff_pages_proved();
+        uint64_t read_on = penguin_fastsnap_diff_pages_read();
+        int64_t d1_full;
+
+        g_setenv("FASTSNAP_FORK_PAGEMAP", "0", true);
+        seq = penguin_fastsnap_seq();
+        penguin_fastsnap_schedule(PENGUIN_FASTSNAP_FORK_DIFF);
+        fastsnap_await(seq + 1);
+        d1_full = (int64_t)penguin_fastsnap_diff_pages();
+        g_unsetenv("FASTSNAP_FORK_PAGEMAP");
+
+        if (d1_full != d1) {
+            printf("fastsnap: FAIL - the pagemap prefilter changed the "
+                   "answer: %" PRId64 " differing pages with it, %" PRId64
+                   " without. It is only ever allowed to change how many "
+                   "pages are READ to reach the answer.\n", d1, d1_full);
+            failures++;
+        } else if (penguin_fastsnap_diff_pages_proved() != 0) {
+            printf("fastsnap: FAIL - FASTSNAP_FORK_PAGEMAP=0 still proved "
+                   "%" PRIu64 " pages by PFN, so the switch does not switch "
+                   "it off and the control above compared nothing.\n",
+                   penguin_fastsnap_diff_pages_proved());
+            failures++;
+        } else if (st_on == FASTSNAP_PAGEMAP_ACTIVE_ST) {
+            printf("fastsnap: prefilter OK - same answer (%" PRId64 " pages) "
+                   "with %" PRIu64 " pages proven by PFN identity and only "
+                   "%" PRIu64 " read back, against %" PRIu64 " read with it "
+                   "off\n", d1, proved_on, read_on,
+                   penguin_fastsnap_diff_pages_read());
+        } else {
+            printf("fastsnap: prefilter INERT here (status %d, PFNs read as "
+                   "zero without CAP_SYS_ADMIN) - the answer agrees, which "
+                   "shows the path is harmless but not that it filters. Run "
+                   "this with the capability to test that.\n", st_on);
+        }
     }
 
     seq = penguin_fastsnap_seq();
