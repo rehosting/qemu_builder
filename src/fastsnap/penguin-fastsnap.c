@@ -792,6 +792,63 @@ penguin_fastsnap_ram_snapshot_bytes(void)
     return fastsnap_ram_snapshot_bytes();
 }
 
+/*
+ * Reset cost, in work rather than in wall clock.
+ *
+ * Every attempt in this lane to explain where a lap goes has inferred
+ * translation work from timings and been wrong three times in a row -- the
+ * device half, the memcpy, and the invalidation were each convicted and then
+ * acquitted. These are the counts themselves. Cumulative since process start;
+ * the caller takes deltas around a reset and around a lap.
+ */
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_tb_flush_count(void)
+{
+    return fastsnap_tcg_stat(FASTSNAP_TCG_TB_FLUSH);
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_tb_invalidate_count(void)
+{
+    return fastsnap_tcg_stat(FASTSNAP_TCG_TB_PHYS_INVALIDATE);
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_tlb_full_flush_count(void)
+{
+    return fastsnap_tcg_stat(FASTSNAP_TCG_TLB_FULL_FLUSH);
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_tlb_part_flush_count(void)
+{
+    return fastsnap_tcg_stat(FASTSNAP_TCG_TLB_PART_FLUSH);
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_tlb_elide_flush_count(void)
+{
+    return fastsnap_tcg_stat(FASTSNAP_TCG_TLB_ELIDE_FLUSH);
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_ram_pages_unchanged(void)
+{
+    return fastsnap_ram_pages_unchanged();
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_ram_pages_invalidated(void)
+{
+    return fastsnap_ram_pages_invalidated();
+}
+
+uint64_t __attribute__((visibility("default")))
+penguin_fastsnap_ram_pages_skipped_nocode(void)
+{
+    return fastsnap_ram_pages_skipped_nocode();
+}
+
 uint64_t __attribute__((visibility("default")))
 penguin_fastsnap_diff_bytes_checked(void)
 {

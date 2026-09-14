@@ -226,6 +226,25 @@ uint64_t penguin_fastsnap_last_ram_digest(void);
 uint64_t penguin_fastsnap_diff_pages(void);
 int64_t penguin_fastsnap_diff_us(void);
 uint64_t penguin_fastsnap_ram_restored_pages(void);
+
+/*
+ * Reset cost measured in WORK, not wall clock: TCG's own counters plus how
+ * overbroad the RAM restore was. All cumulative since process start; take
+ * deltas. Zero under KVM and in a build without TCG.
+ *
+ * penguin_fastsnap_ram_pages_unchanged() is only counted when the environment
+ * variable FASTSNAP_COUNT_UNCHANGED is set -- it costs a memcmp per restored
+ * page -- and reads 0 otherwise, which looks exactly like "every restored page
+ * differed". Read it together with the variable you set.
+ */
+uint64_t penguin_fastsnap_tb_flush_count(void);
+uint64_t penguin_fastsnap_tb_invalidate_count(void);
+uint64_t penguin_fastsnap_tlb_full_flush_count(void);
+uint64_t penguin_fastsnap_tlb_part_flush_count(void);
+uint64_t penguin_fastsnap_tlb_elide_flush_count(void);
+uint64_t penguin_fastsnap_ram_pages_unchanged(void);
+uint64_t penguin_fastsnap_ram_pages_invalidated(void);
+uint64_t penguin_fastsnap_ram_pages_skipped_nocode(void);
 uint64_t penguin_fastsnap_ram_snapshot_bytes(void);
 uint64_t penguin_fastsnap_diff_bytes_checked(void);
 const char *penguin_fastsnap_diff_report(void);

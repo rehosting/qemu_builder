@@ -26,6 +26,16 @@
 #include "system/ramblock.h"
 #include "system/ramlist.h"
 #include "exec/translation-block.h"
+#ifdef CONFIG_TCG
+/* TCG's own counters, already maintained -- tb_flush_count and
+ * tb_phys_invalidate_count. Reaching into accel/tcg from system_ss is
+ * the established convention (bsd-user/qemu.h does it), and tb_ctx is
+ * only DEFINED in a CONFIG_TCG build, so the include and every use of
+ * it must be guarded or libqemu-kvm-*.so fails to link -- the exact
+ * failure fastsnap-kvm-link.nix exists to catch. */
+#include "accel/tcg/tb-context.h"
+#endif
+#include "hw/core/cpu.h"
 #include "system/tcg.h"
 #include "exec/target_page.h"
 #include "qemu/rcu.h"
@@ -261,6 +271,83 @@ static uint64_t fastsnap_dirty_take(RAMBlock *block, unsigned long *bmap)
  * the restored range only -- not tb_flush(), whose cost is the 2.3x cliff this
  * whole design exists to avoid.
  */
+/*
+ * How overbroad is the restore? Three numbers, and none of them change what
+ * the restore DOES -- measuring first and fixing second, because the fix
+ * (skip the copy and the invalidation when the bytes already match) is only
+ * worth making if the pages it skips are many.
+ *
+ * A page is in the dirty set because it was WRITTEN, not because it CHANGED.
+ * A spinlock taken and released, a refcount that returns to its value, a
+ * buffer rewritten with the same bytes: all dirty, all identical, all copied
+ * back for nothing and -- the part that might matter -- all invalidated for
+ * nothing, killing translations that were perfectly valid.
+ *
+ * The memcmp costs about 100 ns on a page that differs early and a few
+ * hundred on one that does not, so it is gated off by default and turned on
+ * for a measurement run.
+ */
+static uint64_t ram_pages_unchanged;
+static uint64_t ram_pages_invalidated;
+static uint64_t ram_pages_skipped_nocode;
+
+uint64_t fastsnap_ram_pages_unchanged(void) { return ram_pages_unchanged; }
+uint64_t fastsnap_ram_pages_invalidated(void) { return ram_pages_invalidated; }
+uint64_t fastsnap_ram_pages_skipped_nocode(void) { return ram_pages_skipped_nocode; }
+
+static bool fastsnap_count_unchanged(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FASTSNAP_COUNT_UNCHANGED");
+        cached = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+/*
+ * TCG and softmmu-TLB counters, sampled rather than derived. These answer
+ * "how much translation work does a reset cause" directly, where every
+ * previous attempt in this lane inferred it from timings.
+ */
+uint64_t fastsnap_tcg_stat(int which)
+{
+#ifdef CONFIG_TCG
+    CPUState *cpu;
+    uint64_t full = 0, part = 0, elide = 0;
+
+    if (!tcg_enabled()) {
+        return 0;
+    }
+    /* CPU_FOREACH walks an RCU list. tcg-stats.c gets away without a guard
+     * because the monitor calls it under the BQL; this is reachable from a
+     * plugin through the ABI, so take the lock rather than inherit an
+     * assumption about the caller. */
+    RCU_READ_LOCK_GUARD();
+    switch (which) {
+    case FASTSNAP_TCG_TB_FLUSH:
+        return qatomic_read(&tb_ctx.tb_flush_count);
+    case FASTSNAP_TCG_TB_PHYS_INVALIDATE:
+        return qatomic_read(&tb_ctx.tb_phys_invalidate_count);
+    case FASTSNAP_TCG_TLB_FULL_FLUSH:
+    case FASTSNAP_TCG_TLB_PART_FLUSH:
+    case FASTSNAP_TCG_TLB_ELIDE_FLUSH:
+        CPU_FOREACH(cpu) {
+            full += qatomic_read(&cpu->neg.tlb.c.full_flush_count);
+            part += qatomic_read(&cpu->neg.tlb.c.part_flush_count);
+            elide += qatomic_read(&cpu->neg.tlb.c.elide_flush_count);
+        }
+        return which == FASTSNAP_TCG_TLB_FULL_FLUSH ? full
+             : which == FASTSNAP_TCG_TLB_PART_FLUSH ? part : elide;
+    default:
+        return 0;
+    }
+#else
+    (void)which;
+    return 0;
+#endif
+}
+
 int64_t fastsnap_ram_restore(void)
 {
     RAMBlock *block;
@@ -315,6 +402,14 @@ int64_t fastsnap_ram_restore(void)
                 off = (uint64_t)bit * psize;
                 len = MIN(psize, block->used_length - off);
 
+                if (fastsnap_count_unchanged() &&
+                    memcmp(block->host + off, copy->data + off, len) == 0) {
+                    /* Dirty but identical: this copy and the invalidation
+                     * below are both doing nothing. Counted, not skipped --
+                     * changing the behaviour here is a separate decision and
+                     * wants this number first. */
+                    ram_pages_unchanged++;
+                }
                 memcpy(block->host + off, copy->data + off, len);
                 /*
                  * ON GUARDING THIS WITH DIRTY_MEMORY_CODE -- an OPEN question,
@@ -372,8 +467,11 @@ int64_t fastsnap_ram_restore(void)
                                                        DIRTY_MEMORY_CODE);
 
                     if (!nocode) {
+                        ram_pages_invalidated++;
                         tb_invalidate_phys_range(NULL, block->offset + off,
                                                  block->offset + off + len - 1);
+                    } else {
+                        ram_pages_skipped_nocode++;
                     }
                 }
                 restored++;
