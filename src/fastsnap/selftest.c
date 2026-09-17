@@ -1225,6 +1225,65 @@ static void fastsnap_cov_pump(int ms)
 }
 
 /*
+ * How much guest execution each positive control waits for, at most.
+ *
+ * FIXED-DURATION PUMPS MADE THIS A RACE. The first version gave the guest a
+ * flat 200 ms and asserted that something had been instrumented. On this
+ * workstation that was 936 blocks and 497 edges; inside the nix build sandbox
+ * the same 200 ms produced 2 blocks and 3 edges. It passed, but a gate whose
+ * signal varies by two orders of magnitude with host load is one bad build
+ * machine away from asserting on zero -- and a coverage test that fails
+ * intermittently teaches people to re-run it.
+ *
+ * So the positive controls now WAIT FOR THE CONDITION, up to this bound,
+ * instead of waiting a fixed time and hoping. The negative controls keep a
+ * flat pump on purpose: there is nothing to wait for, and the only honest way
+ * to assert "still zero" is to give it at least as long as the positive case
+ * got.
+ */
+#define FASTSNAP_COV_WAIT_MS 5000
+#define FASTSNAP_COV_SLICE_MS 50
+
+/* Pump until the guest has translated at least one block the filter
+ * excluded, or the bound expires. */
+static uint64_t fastsnap_cov_wait_filtered(void)
+{
+    int64_t deadline = g_get_monotonic_time() +
+                       (int64_t)FASTSNAP_COV_WAIT_MS * 1000;
+    uint64_t n;
+
+    do {
+        fastsnap_cov_pump(FASTSNAP_COV_SLICE_MS);
+        n = penguin_fastsnap_cov_tbs_filtered();
+    } while (!n && g_get_monotonic_time() < deadline);
+    return n;
+}
+
+/*
+ * Pump until the map has something in it, or the bound expires.
+ *
+ * Needs a COV_READ each time round, because edges only become visible when
+ * the map is summarised -- and a read does not clear, so this cannot consume
+ * what it is waiting for. Blocks are cached, so this is waiting on EXECUTION
+ * rather than translation, which is why it cannot use the counter above.
+ */
+static uint64_t fastsnap_cov_wait_edges(void)
+{
+    int64_t deadline = g_get_monotonic_time() +
+                       (int64_t)FASTSNAP_COV_WAIT_MS * 1000;
+    uint64_t e;
+
+    do {
+        fastsnap_cov_pump(FASTSNAP_COV_SLICE_MS);
+        if (fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ) < 0) {
+            return 0;
+        }
+        e = penguin_fastsnap_cov_edges();
+    } while (!e && g_get_monotonic_time() < deadline);
+    return e;
+}
+
+/*
  * Edge coverage, and mostly its negative controls.
  *
  * A coverage map is the easiest thing in this file to fake. It is a buffer of
@@ -1271,11 +1330,17 @@ static int fastsnap_selftest_coverage(void)
            " us\n", penguin_fastsnap_cov_map_size(),
            penguin_fastsnap_last_us());
 
-    fastsnap_cov_pump(200);
-    if (fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ) < 0) {
-        printf("fastsnap: FAIL - coverage read did not complete\n");
-        return failures + 1;
-    }
+    /*
+     * Waits for an EDGE, not merely for a translated block. A block is
+     * counted as instrumented when it is TRANSLATED, and the map only moves
+     * when it EXECUTES; CONTROL B below needs the first summarise to be the
+     * one that finds a non-empty map. wait_edges() reads without clearing and
+     * folds nothing while the map is empty, so the read that first sees edges
+     * IS that first summarise, and B stays exact.
+     *
+     * A timeout leaves e1 at zero, which CONTROL A reports.
+     */
+    fastsnap_cov_wait_edges();
     e1 = penguin_fastsnap_cov_edges();
     n1 = penguin_fastsnap_cov_new_edges();
     tb1 = penguin_fastsnap_cov_tbs_instrumented();
@@ -1364,8 +1429,7 @@ static int fastsnap_selftest_coverage(void)
 
     /* And the clear emptied the map rather than stopping the logging: with
      * coverage still armed, running the guest must refill it. */
-    fastsnap_cov_pump(200);
-    fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ);
+    fastsnap_cov_wait_edges();
     if (penguin_fastsnap_cov_edges() == 0) {
         printf("fastsnap: FAIL - no edges after a clear and further guest "
                "execution, so the clear disabled logging rather than emptying "
@@ -1389,7 +1453,7 @@ static int fastsnap_selftest_coverage(void)
         printf("fastsnap: FAIL - re-arm with a filter did not complete\n");
         return failures + 1;
     }
-    fastsnap_cov_pump(200);
+    fastsnap_cov_wait_filtered();
     fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ);
     e3 = penguin_fastsnap_cov_edges();
     tbi3 = penguin_fastsnap_cov_tbs_instrumented();
@@ -1416,7 +1480,11 @@ static int fastsnap_selftest_coverage(void)
         printf("fastsnap: FAIL - disarm/clear did not complete\n");
         return failures + 1;
     }
-    fastsnap_cov_pump(200);
+    /* A FLAT PUMP, and a long one. There is nothing to wait for here -- the
+     * assertion is that nothing happens -- so the only way to make "still
+     * zero" mean anything is to give it at least as long as the positive
+     * controls were allowed to take. */
+    fastsnap_cov_pump(FASTSNAP_COV_WAIT_MS / 5);
     fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ);
     e4 = penguin_fastsnap_cov_edges();
     if (penguin_fastsnap_cov_armed()) {
