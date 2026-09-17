@@ -32,8 +32,8 @@ exports 89 qemu_plugin_* symbols despite configs/default.json never naming
   - The plugin API cannot express an edge. Its inline ops are exactly
     ADD_U64 and STORE_U64 against a fixed scoreboard entry, with no
     indexed addressing, so map[prev ^ cur]++ has to become a per-block
-    callback -- an indirect call per translated block, against the seven
-    inline TCG ops this emits.
+    callback -- an indirect call per translated block, against the eight
+    inline TCG ops this emits (before optimisation).
 
 Costs nothing when unused: fastsnap_cov_translate() returns on a single
 global bool before touching the TCG context, and nothing calls it in a
