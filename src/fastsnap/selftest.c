@@ -1194,6 +1194,240 @@ static int fastsnap_selftest_loop(void)
  * oracle that never looks -- which is the failure this lane has now produced
  * often enough to design against rather than hope about.
  */
+/* Schedule one fastsnap op and wait for its bottom half. */
+static int fastsnap_cov_do(int op)
+{
+    uint64_t seq = penguin_fastsnap_seq();
+
+    penguin_fastsnap_schedule(op);
+    if (fastsnap_await(seq + 1) || penguin_fastsnap_last_rc() != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Let the guest execute for @ms milliseconds of wall time.
+ *
+ * main_loop_wait() drops the BQL while it polls, which is the only reason the
+ * vCPU threads can make progress at all while a machine-init-done notifier is
+ * running. Bounded by the clock rather than by an iteration count because the
+ * thing being waited for is guest execution, and how many main-loop turns that
+ * takes is not a property this test should pretend to know.
+ */
+static void fastsnap_cov_pump(int ms)
+{
+    int64_t deadline = g_get_monotonic_time() + (int64_t)ms * 1000;
+
+    while (g_get_monotonic_time() < deadline) {
+        main_loop_wait(true);
+    }
+}
+
+/*
+ * Edge coverage, and mostly its negative controls.
+ *
+ * A coverage map is the easiest thing in this file to fake. It is a buffer of
+ * bytes; ANY nonzero byte in it looks like working instrumentation, and a
+ * buffer that is never cleared keeps looking like it forever. So the positive
+ * result here (edges appear when the guest runs) is the cheap half. The three
+ * that matter are the ones that must produce ZERO:
+ *
+ *   - cleared map reads zero, or every later number is the first lap's residue
+ *   - filtered-out range instruments nothing, and SAYS so through the tbs
+ *     counters rather than through an empty map that could mean anything
+ *   - disarmed reads zero, or a map that fills for some other reason is
+ *     indistinguishable from coverage that works
+ *
+ * Runs on -M virt with no kernel, so the guest is executing whatever the reset
+ * vector gives it. That is fine and deliberate: this asserts that the
+ * mechanism observes execution, not what the execution is.
+ */
+static int fastsnap_selftest_coverage(void)
+{
+    uint64_t e1, n1, tb1, e2, n2, e3, tbi3, tbf3, e4;
+    int failures = 0;
+
+    if (fastsnap_cov_do(PENGUIN_FASTSNAP_COV_ARM) < 0) {
+        printf("fastsnap: FAIL - coverage could not be armed\n");
+        return 1;
+    }
+    if (!penguin_fastsnap_cov_armed() ||
+        penguin_fastsnap_cov_map_addr() == 0) {
+        printf("fastsnap: FAIL - arm returned success with no map "
+               "(armed=%d addr=0x%" PRIx64 ")\n",
+               (int)penguin_fastsnap_cov_armed(),
+               penguin_fastsnap_cov_map_addr());
+        return failures + 1;
+    }
+    printf("fastsnap: coverage armed, %" PRIu64 " byte map in %" PRId64
+           " us\n", penguin_fastsnap_cov_map_size(),
+           penguin_fastsnap_last_us());
+
+    fastsnap_cov_pump(200);
+    if (fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ) < 0) {
+        printf("fastsnap: FAIL - coverage read did not complete\n");
+        return failures + 1;
+    }
+    e1 = penguin_fastsnap_cov_edges();
+    n1 = penguin_fastsnap_cov_new_edges();
+    tb1 = penguin_fastsnap_cov_tbs_instrumented();
+
+    /* CONTROL A, positive. */
+    if (tb1 == 0) {
+        printf("fastsnap: CONTROL FAILED - not one block was instrumented, so "
+               "an empty map says nothing about the guest\n");
+        failures++;
+    } else if (e1 == 0) {
+        printf("fastsnap: CONTROL FAILED - %" PRIu64 " blocks were "
+               "instrumented and the map is still empty, so the emitted ops "
+               "are not reaching it\n", tb1);
+        failures++;
+    } else {
+        printf("fastsnap: control OK - %" PRIu64 " blocks instrumented, %"
+               PRIu64 " edges, %" PRIu64 " hits, scan %" PRId64 " us\n",
+               tb1, e1, penguin_fastsnap_cov_hits(),
+               penguin_fastsnap_cov_scan_us());
+    }
+
+    /* CONTROL B. The cumulative map started empty, so on the first summarise
+     * every edge is a new one. If these disagree the virgin map is carrying
+     * state it cannot have. */
+    if (e1 && n1 != e1) {
+        printf("fastsnap: CONTROL FAILED - first summarise reports %" PRIu64
+               " edges but only %" PRIu64 " of them new, against an empty "
+               "cumulative map\n", e1, n1);
+        failures++;
+    }
+
+    /*
+     * CONTROL C: the cumulative map accumulates.
+     *
+     * Read the SAME map a second time without clearing or running the guest.
+     * The byte counts have not moved, so the edge count must not either -- and
+     * every one of those edges was folded into the cumulative map by the first
+     * read, so not one of them may be reported new again.
+     *
+     * Deliberately not phrased as "run the guest twice and expect fewer new
+     * edges the second time". That version was written first and it is a bad
+     * test here: this guest has no kernel, so it wanders forward through
+     * memory executing zeroes and essentially never revisits an address. It
+     * reported 488 of 494 edges new on the second pass and still passed,
+     * because "fewer" was all it asked for. Re-reading a frozen map asks the
+     * question the cumulative map actually answers, and its answer is exact.
+     */
+    e2 = penguin_fastsnap_cov_edges();
+    if (fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ) < 0) {
+        printf("fastsnap: FAIL - second read did not complete\n");
+        return failures + 1;
+    }
+    n2 = penguin_fastsnap_cov_new_edges();
+    if (penguin_fastsnap_cov_edges() != e2) {
+        printf("fastsnap: CONTROL FAILED - re-reading an unchanged map gives %"
+               PRIu64 " edges where the first read gave %" PRIu64 "; the scan "
+               "is not a function of the map alone\n",
+               penguin_fastsnap_cov_edges(), e2);
+        failures++;
+    } else if (n2 != 0 || penguin_fastsnap_cov_new_buckets() != 0) {
+        printf("fastsnap: CONTROL FAILED - re-reading an unchanged map reports "
+               "%" PRIu64 " new edges and %" PRIu64 " new buckets; the "
+               "cumulative map is not accumulating, so every input would look "
+               "interesting\n", n2, penguin_fastsnap_cov_new_buckets());
+        failures++;
+    } else {
+        printf("fastsnap: control OK - re-read gives the same %" PRIu64
+               " edges and nothing new, %" PRIu64 " known in total\n",
+               e2, penguin_fastsnap_cov_total_edges());
+    }
+
+    /* CONTROL D, negative: a cleared map reads zero. */
+    if (fastsnap_cov_do(PENGUIN_FASTSNAP_COV_CLEAR) < 0 ||
+        fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ) < 0) {
+        printf("fastsnap: FAIL - clear/read did not complete\n");
+        return failures + 1;
+    }
+    if (penguin_fastsnap_cov_edges() != 0) {
+        printf("fastsnap: CONTROL FAILED - %" PRIu64 " edges survive a clear, "
+               "so every per-lap count is contaminated by the lap before it\n",
+               penguin_fastsnap_cov_edges());
+        failures++;
+    } else {
+        printf("fastsnap: control OK - cleared map reads zero\n");
+    }
+
+    /* And the clear emptied the map rather than stopping the logging: with
+     * coverage still armed, running the guest must refill it. */
+    fastsnap_cov_pump(200);
+    fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ);
+    if (penguin_fastsnap_cov_edges() == 0) {
+        printf("fastsnap: FAIL - no edges after a clear and further guest "
+               "execution, so the clear disabled logging rather than emptying "
+               "the map\n");
+        failures++;
+    } else {
+        printf("fastsnap: control OK - map refills after a clear (%" PRIu64
+               " edges)\n", penguin_fastsnap_cov_edges());
+    }
+
+    /*
+     * CONTROL E, and the reason the tbs counters are in the ABI at all.
+     *
+     * Point the filter at a range the guest cannot be executing. The map then
+     * reads zero -- and a zero map is exactly what a guest that found nothing
+     * also produces. What separates them is instrumented == 0 with filtered >
+     * 0, which is the first thing anyone configuring a range gets wrong.
+     */
+    penguin_fastsnap_cov_set_filter(0xdead0000ULL, 0xdead1000ULL);
+    if (fastsnap_cov_do(PENGUIN_FASTSNAP_COV_ARM) < 0) {
+        printf("fastsnap: FAIL - re-arm with a filter did not complete\n");
+        return failures + 1;
+    }
+    fastsnap_cov_pump(200);
+    fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ);
+    e3 = penguin_fastsnap_cov_edges();
+    tbi3 = penguin_fastsnap_cov_tbs_instrumented();
+    tbf3 = penguin_fastsnap_cov_tbs_filtered();
+    if (tbi3 != 0 || e3 != 0) {
+        printf("fastsnap: CONTROL FAILED - a filter covering no executable "
+               "address still instrumented %" PRIu64 " blocks and logged %"
+               PRIu64 " edges\n", tbi3, e3);
+        failures++;
+    } else if (tbf3 == 0) {
+        printf("fastsnap: CONTROL FAILED - nothing instrumented and nothing "
+               "filtered either, so the empty map cannot be attributed and "
+               "the diagnostic that exists to attribute it is dead\n");
+        failures++;
+    } else {
+        printf("fastsnap: control OK - filter excluded all %" PRIu64 " blocks "
+               "and says so\n", tbf3);
+    }
+
+    /* CONTROL F, the last negative: disarmed means zero. */
+    penguin_fastsnap_cov_set_filter(0, 0);
+    if (fastsnap_cov_do(PENGUIN_FASTSNAP_COV_DISARM) < 0 ||
+        fastsnap_cov_do(PENGUIN_FASTSNAP_COV_CLEAR) < 0) {
+        printf("fastsnap: FAIL - disarm/clear did not complete\n");
+        return failures + 1;
+    }
+    fastsnap_cov_pump(200);
+    fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ);
+    e4 = penguin_fastsnap_cov_edges();
+    if (penguin_fastsnap_cov_armed()) {
+        printf("fastsnap: FAIL - still armed after a disarm\n");
+        failures++;
+    }
+    if (e4 != 0) {
+        printf("fastsnap: CONTROL FAILED - %" PRIu64 " edges logged after a "
+               "disarm; blocks translated before it are still writing to the "
+               "map, so the flush did not take\n", e4);
+        failures++;
+    } else {
+        printf("fastsnap: control OK - disarmed map stays empty\n");
+    }
+
+    return failures;
+}
+
 static int fastsnap_selftest_allowlist(void)
 {
     uint32_t poke = 0xfeedfaceU, imsc = FASTSNAP_IMSC_VALUE;
@@ -1443,6 +1677,7 @@ static void fastsnap_on_running(void *opaque, bool running, RunState state)
     failures += fastsnap_selftest_dirty_track();
     failures += fastsnap_selftest_loop();
     failures += fastsnap_selftest_allowlist();
+    failures += fastsnap_selftest_coverage();
     printf("fastsnap: SELFTEST %s\n", failures ? "FAILED" : "PASSED");
     fflush(stdout);
     /* _exit, not exit: returning through QEMU's atexit teardown from a

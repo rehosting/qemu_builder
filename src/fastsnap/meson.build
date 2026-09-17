@@ -6,6 +6,7 @@
 # device block, and nothing here touches a TCG fast path.
 system_ss.add(files(
   'channel-buffer-writeback.c',
+  'coverage.c',
   'device-save.c',
   'dirty-track.c',
   'fork-oracle.c',

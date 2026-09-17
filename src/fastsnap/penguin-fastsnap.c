@@ -47,6 +47,7 @@
 #include "system/ramlist.h"
 #include "qemu/rcu.h"
 
+#include "fastsnap/coverage.h"
 #include "fastsnap/device-save.h"
 #include "fastsnap/dirty-track.h"
 #include "fastsnap/fork-oracle.h"
@@ -134,6 +135,10 @@ typedef enum {
     FASTSNAP_OP_LOOP_ARM = PENGUIN_FASTSNAP_LOOP_ARM,
     FASTSNAP_OP_LOOP_RESET = PENGUIN_FASTSNAP_LOOP_RESET,
     FASTSNAP_OP_LOOP_RESET_VERIFY = PENGUIN_FASTSNAP_LOOP_RESET_VERIFY,
+    FASTSNAP_OP_COV_ARM = PENGUIN_FASTSNAP_COV_ARM,
+    FASTSNAP_OP_COV_CLEAR = PENGUIN_FASTSNAP_COV_CLEAR,
+    FASTSNAP_OP_COV_READ = PENGUIN_FASTSNAP_COV_READ,
+    FASTSNAP_OP_COV_DISARM = PENGUIN_FASTSNAP_COV_DISARM,
 } FastsnapOp;
 
 static uint64_t fastsnap_last_digest;
@@ -462,6 +467,17 @@ static int fastsnap_do(FastsnapOp op)
         device_restore_all(fastsnap_slot);
         n = fastsnap_ram_restore();
         fastsnap_last_us = g_get_monotonic_time() - t0;
+        /*
+         * The lap's coverage, summarised and cleared here rather than by an op
+         * of its own. Folding it in costs one scan; asking for it separately
+         * would cost a scheduled op, and on this lane an op is the more
+         * expensive of the two. Deliberately AFTER the clock stops: the scan
+         * is not part of the reset and must not inflate it. Read its own cost
+         * from penguin_fastsnap_cov_scan_us().
+         */
+        if (fastsnap_cov_clear_on_reset()) {
+            fastsnap_cov_lap_end();
+        }
         return n < 0 ? -1 : 0;
     }
 
@@ -489,6 +505,11 @@ static int fastsnap_do(FastsnapOp op)
         d = fastsnap_fork_ref_diff();
         fastsnap_dev_diff_compute();
         fastsnap_diff_us = g_get_monotonic_time() - t1;
+        /* After diff_us for the same reason it is after last_us above: the
+         * coverage scan belongs to neither the reset nor the oracle. */
+        if (fastsnap_cov_clear_on_reset()) {
+            fastsnap_cov_lap_end();
+        }
         return d < 0 ? -1 : 0;
     }
 
@@ -574,6 +595,30 @@ static int fastsnap_do(FastsnapOp op)
             g_free(fastsnap_slot);
             fastsnap_slot = NULL;
         }
+        fastsnap_last_us = 0;
+        return 0;
+
+    case FASTSNAP_OP_COV_ARM:
+        t0 = g_get_monotonic_time();
+        if (fastsnap_cov_arm() != 0) {
+            return -1;
+        }
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        return 0;
+
+    case FASTSNAP_OP_COV_CLEAR:
+        t0 = g_get_monotonic_time();
+        fastsnap_cov_clear();
+        fastsnap_last_us = g_get_monotonic_time() - t0;
+        return 0;
+
+    case FASTSNAP_OP_COV_READ:
+        fastsnap_cov_read();
+        fastsnap_last_us = 0;
+        return 0;
+
+    case FASTSNAP_OP_COV_DISARM:
+        fastsnap_cov_disarm();
         fastsnap_last_us = 0;
         return 0;
     }

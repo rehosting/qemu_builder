@@ -23,7 +23,18 @@ third party*, so they get an explicit declaration rather than an inherited one.
   repository licence explicitly rather than leaving it implicit.
 
 `selftest.c` and the pristine copies of the upstream originals are ours and
-were written for this port.
+were written for this port. So is everything else in this directory that the
+table above does not name -- `dirty-track.c`, `fork-oracle.c`,
+`ram-snapshot.c`, `penguin-fastsnap.c` and `coverage.c`.
+
+`coverage.c` needs one attribution that is not a code one. No code was taken
+from AFL or from any of its QEMU modes, but the SCHEME it implements is theirs:
+the `map[prev ^ cur]++` edge hash with `prev = cur >> 1`, the 64 KiB default
+map, and the power-of-two hit-count buckets used to judge novelty all come from
+AFL, and are reproduced here because a map that is not shaped like AFL's cannot
+be read by anything that consumes one. The implementation -- emitting the ops
+into QEMU 11.1's translator, the cumulative map, the address filter and the
+fold into the fastsnap reset -- is ours.
 
 Adoption was whole-file with attribution, deliberately. The alternative —
 folding these into the patch series — would interleave third-party GPL code

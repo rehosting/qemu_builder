@@ -213,6 +213,55 @@
  * the count is reported per verification lap rather than checked once. A
  * denylist stays the conservative default.
  */
+/*
+ * Edge coverage, filled by code emitted into every translated block.
+ *
+ * The loop could reset a guest and feed it a mutated input long before it
+ * could notice that an input reached somewhere new -- and without that, an
+ * exec/s figure is a loop rate, not a fuzzing rate. The peers it gets
+ * compared to (Nyx, FIRM-AFL) are coverage-guided; a rate measured without
+ * the feedback they include is not the same quantity. This is that half.
+ *
+ * COV_ARM allocates the map on first use, zeroes it, starts instrumenting,
+ * and queues a tb_flush -- necessary, because instrumentation is emitted at
+ * TRANSLATION time and a block already cached would never acquire any.
+ * COV_CLEAR zeroes the per-lap map. COV_READ summarises without clearing.
+ * COV_DISARM stops instrumenting new blocks (and flushes, for the same
+ * reason). The map is allocated once and NEVER freed or resized: its address
+ * is materialised as a constant inside every instrumented block.
+ *
+ * In the loop, none of these run per lap. LOOP_RESET and LOOP_RESET_VERIFY
+ * summarise and clear the map as part of the reset when
+ * penguin_fastsnap_cov_set_clear_on_reset() is on (it is by default), so a
+ * lap costs one scan and no extra scheduled op -- an op being the more
+ * expensive of the two by a wide margin on this lane.
+ *
+ * Read penguin_fastsnap_cov_new_buckets() for "did this input do anything
+ * interesting", and penguin_fastsnap_cov_tbs_instrumented() before believing
+ * any zero: an empty map means either the guest found nothing or the address
+ * filter names a range the target's code never occupies, and the map alone
+ * cannot tell those apart.
+ */
+#define PENGUIN_FASTSNAP_COV_ARM    18
+#define PENGUIN_FASTSNAP_COV_CLEAR  19
+#define PENGUIN_FASTSNAP_COV_READ   20
+#define PENGUIN_FASTSNAP_COV_DISARM 21
+
+void penguin_fastsnap_cov_set_filter(uint64_t lo, uint64_t hi);
+bool penguin_fastsnap_cov_set_map_size(uint64_t size);
+void penguin_fastsnap_cov_set_clear_on_reset(bool on);
+uint64_t penguin_fastsnap_cov_map_addr(void);
+uint64_t penguin_fastsnap_cov_map_size(void);
+bool penguin_fastsnap_cov_armed(void);
+uint64_t penguin_fastsnap_cov_edges(void);
+uint64_t penguin_fastsnap_cov_hits(void);
+uint64_t penguin_fastsnap_cov_new_edges(void);
+uint64_t penguin_fastsnap_cov_new_buckets(void);
+uint64_t penguin_fastsnap_cov_total_edges(void);
+uint64_t penguin_fastsnap_cov_tbs_instrumented(void);
+uint64_t penguin_fastsnap_cov_tbs_filtered(void);
+int64_t penguin_fastsnap_cov_scan_us(void);
+
 void penguin_fastsnap_set_denylist(const char *csv);
 void penguin_fastsnap_set_allowlist(const char *csv);
 const char *penguin_fastsnap_section_names(void);
