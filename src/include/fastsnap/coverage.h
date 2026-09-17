@@ -32,8 +32,9 @@
  *      fixed scoreboard entry (include/plugins/qemu-plugin.h) -- there is no
  *      indexed addressing, so map[prev ^ cur]++ is not expressible inline and
  *      has to become a per-block CALLBACK through the plugin dispatch. That is
- *      an indirect call per translated block against the seven inline TCG ops
- *      emitted below, on a lane whose whole subject is the cost of a lap.
+ *      an indirect call per translated block against the eight inline TCG ops
+ *      emitted below (before optimisation -- the pointer arithmetic may fold),
+ *      on a lane whose whole subject is the cost of a lap.
  *
  * WHAT IS EMITTED, per instrumented block, is AFL's classic edge hash:
  *
