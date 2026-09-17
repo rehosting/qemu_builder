@@ -36,6 +36,7 @@
 #include "system/memory.h"
 #include "fastsnap/channel-buffer-writeback.h"
 #include "fastsnap/device-save.h"
+#include "fastsnap/coverage.h"
 #include "fastsnap/penguin-fastsnap.h"
 #include "fastsnap/fork-oracle.h"
 #include "fastsnap/ram-snapshot.h"
