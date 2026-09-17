@@ -122,4 +122,22 @@ void fastsnap_cov_clear(void);
 /* Whether LOOP_RESET should call fastsnap_cov_lap_end(). */
 bool fastsnap_cov_clear_on_reset(void);
 
+/*
+ * The map index a block at @pc would log to -- the hash, masked.
+ *
+ * Exposed for the selftest, and it is worth saying why rather than leaving it
+ * as a stray export. The guest-driven controls can only assert that coverage
+ * responds to whatever the machine happens to execute, and on -M virt with no
+ * kernel that is two blocks inside a nix sandbox. They cannot say anything
+ * about how the hash behaves across a real text segment's worth of addresses,
+ * which is the property a corpus actually depends on: a "hash" that collapsed
+ * to (pc & mask) would pass every one of those controls and then alias every
+ * page-aligned block onto sixteen slots.
+ *
+ * So the selftest asks the function directly over a synthetic address range.
+ * That check needs no guest, no machine and no luck, and it is the only part
+ * of this file whose strength does not vary with the host.
+ */
+uint32_t fastsnap_cov_block_index(uint64_t pc);
+
 #endif /* FASTSNAP_COVERAGE_H */

@@ -1302,6 +1302,210 @@ static uint64_t fastsnap_cov_wait_edges(void)
  * vector gives it. That is fine and deliberate: this asserts that the
  * mechanism observes execution, not what the execution is.
  */
+/*
+ * The summarise-and-novelty logic, at a scale no guest here can reach.
+ *
+ * WHY THIS IS NOT DRIVEN BY THE GUEST. Every control above depends on what
+ * the machine happens to execute, and on -M virt with no kernel that is two
+ * translated blocks and three edges inside a nix sandbox against three hundred
+ * blocks on a workstation. Those controls are the right shape for the wiring
+ * -- does the map clear, does the flush take, does the filter filter -- and
+ * they are the wrong instrument for the arithmetic, because a bucket rule that
+ * was subtly wrong would be invisible at three edges and would only surface as
+ * a fuzzer that finds nothing interesting after a week.
+ *
+ * So this writes the map directly and checks the exact answers. Coverage is
+ * DISARMED by the time this runs, which is what makes writing to the map safe:
+ * armed, the guest would be writing to it too and none of these counts would
+ * be exact.
+ *
+ * Nothing here asserts on new_edges from the first read. The cumulative map
+ * still holds whatever the guest-driven controls above put in it, and which
+ * indices those were is not knowable. Every assertion below is therefore
+ * framed as a DELTA between two reads of a map this function controls, which
+ * is exact whatever the history is.
+ */
+static int fastsnap_selftest_cov_summary(void)
+{
+    /* Distinct values spanning four different buckets, so a rule that
+     * collapsed them would change the answer. 1 -> bucket 0, 2 -> bucket 1,
+     * 5 -> bucket 3 (4..7), 200 -> bucket 7 (128..255). */
+    static const uint32_t idx[] = { 0x0111, 0x0222, 0x0333, 0x0444 };
+    static const uint8_t val[] = { 1, 2, 5, 200 };
+    const uint64_t want_hits = 1 + 2 + 5 + 200;
+    uint8_t *map = (uint8_t *)(uintptr_t)penguin_fastsnap_cov_map_addr();
+    int failures = 0;
+    size_t i;
+
+    if (!map) {
+        printf("fastsnap: FAIL - no coverage map to summarise\n");
+        return 1;
+    }
+    if (penguin_fastsnap_cov_armed()) {
+        printf("fastsnap: FAIL - the synthetic summary runs while armed; the "
+               "guest would be writing to the same map and no count below "
+               "would be exact\n");
+        return 1;
+    }
+
+    /* ---- exact counting ---- */
+    if (fastsnap_cov_do(PENGUIN_FASTSNAP_COV_CLEAR) < 0) {
+        printf("fastsnap: FAIL - clear before the synthetic summary failed\n");
+        return 1;
+    }
+    for (i = 0; i < ARRAY_SIZE(idx); i++) {
+        map[idx[i]] = val[i];
+    }
+    if (fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ) < 0) {
+        printf("fastsnap: FAIL - synthetic read failed\n");
+        return 1;
+    }
+    if (penguin_fastsnap_cov_edges() != ARRAY_SIZE(idx) ||
+        penguin_fastsnap_cov_hits() != want_hits) {
+        printf("fastsnap: FAIL - a map with %zu set bytes summing to %" PRIu64
+               " reports %" PRIu64 " edges and %" PRIu64 " hits\n",
+               ARRAY_SIZE(idx), want_hits, penguin_fastsnap_cov_edges(),
+               penguin_fastsnap_cov_hits());
+        failures++;
+    } else {
+        printf("fastsnap: control OK - %zu synthetic edges counted exactly, "
+               "%" PRIu64 " hits\n", ARRAY_SIZE(idx), want_hits);
+    }
+
+    /* ---- the same map again: everything is now known ---- */
+    fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ);
+    if (penguin_fastsnap_cov_new_edges() != 0 ||
+        penguin_fastsnap_cov_new_buckets() != 0) {
+        printf("fastsnap: FAIL - re-reading the synthetic map reports %" PRIu64
+               " new edges and %" PRIu64 " new buckets\n",
+               penguin_fastsnap_cov_new_edges(),
+               penguin_fastsnap_cov_new_buckets());
+        failures++;
+    }
+
+    /*
+     * ---- A NEW BUCKET ON A KNOWN EDGE ----
+     *
+     * This is the assertion the whole bucket scheme exists for, and the one
+     * an edge-presence bitmap cannot make. Index 0x0111 has been seen; its
+     * count moves from 1 to 3, which is a different bucket. That must read as
+     * ONE new bucket and ZERO new edges: nowhere new was reached, but
+     * somewhere known was reached a different number of times, which is how a
+     * loop bound gets found.
+     */
+    map[idx[0]] = 3;
+    fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ);
+    if (penguin_fastsnap_cov_new_edges() != 0 ||
+        penguin_fastsnap_cov_new_buckets() != 1) {
+        printf("fastsnap: FAIL - a known edge moving from 1 hit to 3 reports "
+               "%" PRIu64 " new edges and %" PRIu64 " new buckets, wanted "
+               "0 and 1\n", penguin_fastsnap_cov_new_edges(),
+               penguin_fastsnap_cov_new_buckets());
+        failures++;
+    } else {
+        printf("fastsnap: control OK - a known edge hit a different number of "
+               "times is new, without being a new edge\n");
+    }
+
+    /*
+     * ---- AND THE TOP BUCKET ABSORBS A WRAP ----
+     *
+     * The counters are bytes and they wrap. 200 and 255 are the same bucket,
+     * so a count that saturates is a rounding error in the top class rather
+     * than a lost edge -- which is the argument the byte counter rests on, and
+     * it is asserted here rather than left in a comment.
+     */
+    map[idx[3]] = 255;
+    fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ);
+    if (penguin_fastsnap_cov_new_buckets() != 0) {
+        printf("fastsnap: FAIL - 200 hits and 255 hits land in different "
+               "buckets (%" PRIu64 " new), so a wrapping counter is not the "
+               "rounding error the byte width assumes\n",
+               penguin_fastsnap_cov_new_buckets());
+        failures++;
+    } else {
+        printf("fastsnap: control OK - the top bucket absorbs a saturating "
+               "counter\n");
+    }
+
+    fastsnap_cov_do(PENGUIN_FASTSNAP_COV_CLEAR);
+    return failures;
+}
+
+/*
+ * The hash, over an address range no guest here executes.
+ *
+ * A corpus is only portable if the same block gets the same index in every
+ * run, and a map is only useful if distinct blocks mostly get distinct
+ * indices. Neither property is observable from two translated blocks.
+ *
+ * PAGE-ALIGNED addresses on purpose. A "hash" that had degenerated into
+ * (pc & mask) would pass every guest-driven control in this file and would
+ * also pass a test over sequential addresses -- and would then alias every
+ * page-aligned block in a real text segment onto sixteen slots out of 65,536.
+ * Sparse input is what tells the two apart.
+ */
+static int fastsnap_selftest_cov_hash(void)
+{
+    const uint32_t n = 4096;
+    uint32_t size = (uint32_t)penguin_fastsnap_cov_map_size();
+    uint8_t *seen;
+    uint32_t i, distinct = 0;
+    int failures = 0;
+
+    /*
+     * The floor. Throwing n values into `size` slots leaves about
+     * size * (1 - (1 - 1/size)^n) distinct, which is ~3,971 of 4,096 here.
+     * 3,800 leaves room for an unlucky hash without admitting a broken one:
+     * (pc & mask) on this input yields 16.
+     */
+    const uint32_t floor_distinct = 3800;
+
+    if (!size) {
+        printf("fastsnap: FAIL - coverage map size reads zero\n");
+        return 1;
+    }
+    seen = g_malloc0(size);
+
+    for (i = 0; i < n; i++) {
+        uint64_t pc = (uint64_t)i << 12;
+        uint32_t k = fastsnap_cov_block_index(pc);
+
+        if (k >= size) {
+            printf("fastsnap: FAIL - index %u for pc 0x%" PRIx64 " is outside "
+                   "a %u-byte map\n", k, pc, size);
+            failures++;
+            break;
+        }
+        /* DETERMINISM, checked on every value rather than sampled: the same
+         * block must land in the same slot, or a corpus means nothing across
+         * runs. */
+        if (k != fastsnap_cov_block_index(pc)) {
+            printf("fastsnap: FAIL - the block index for pc 0x%" PRIx64 " is "
+                   "not stable between calls\n", pc);
+            failures++;
+            break;
+        }
+        if (!seen[k]) {
+            seen[k] = 1;
+            distinct++;
+        }
+    }
+    g_free(seen);
+
+    if (!failures && distinct < floor_distinct) {
+        printf("fastsnap: FAIL - %u page-aligned addresses hash to only %u of "
+               "%u slots (wanted at least %u); the index is aliasing, and a "
+               "map that aliases reports coverage the guest did not reach\n",
+               n, distinct, size, floor_distinct);
+        failures++;
+    } else if (!failures) {
+        printf("fastsnap: control OK - %u sparse addresses reach %u distinct "
+               "slots of %u, stable across calls\n", n, distinct, size);
+    }
+    return failures;
+}
+
 static int fastsnap_selftest_coverage(void)
 {
 #ifndef CONFIG_TCG
@@ -1500,6 +1704,8 @@ static int fastsnap_selftest_coverage(void)
         printf("fastsnap: control OK - disarmed map stays empty\n");
     }
 
+    failures += fastsnap_selftest_cov_summary();
+    failures += fastsnap_selftest_cov_hash();
     return failures;
 #endif /* CONFIG_TCG */
 }

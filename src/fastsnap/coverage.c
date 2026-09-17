@@ -116,6 +116,16 @@ static inline uint8_t cov_bucket(uint8_t n)
     return 1 << 7;
 }
 
+/*
+ * OUTSIDE the CONFIG_TCG guard on purpose. The hash is arithmetic, not
+ * codegen, and the selftest checks it in every build -- including the KVM one,
+ * where nothing else in this file can run.
+ */
+uint32_t fastsnap_cov_block_index(uint64_t pc)
+{
+    return cov_block_id(pc) & cov_map_mask;
+}
+
 #ifdef CONFIG_TCG
 
 void fastsnap_cov_translate(uint64_t pc)
