@@ -1245,6 +1245,13 @@ static void fastsnap_cov_pump(int ms)
  */
 static int fastsnap_selftest_coverage(void)
 {
+#ifndef CONFIG_TCG
+    /* Not a failure. Coverage is logged by ops emitted into translated
+     * blocks, and a KVM build translates nothing; the ABI is present so the
+     * delta check stays meaningful, and COV_ARM refuses with a reason. */
+    printf("fastsnap: coverage SELFTEST SKIPPED - no TCG in this build\n");
+    return 0;
+#else
     uint64_t e1, n1, tb1, e2, n2, e3, tbi3, tbf3, e4;
     int failures = 0;
 
@@ -1426,6 +1433,7 @@ static int fastsnap_selftest_coverage(void)
     }
 
     return failures;
+#endif /* CONFIG_TCG */
 }
 
 static int fastsnap_selftest_allowlist(void)

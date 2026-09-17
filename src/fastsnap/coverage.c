@@ -7,8 +7,26 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "hw/core/cpu.h"
+
+/*
+ * THE ABI IS UNCONDITIONAL, THE MECHANISM IS NOT.
+ *
+ * This logs edges by emitting ops into translated blocks, so it cannot exist
+ * under KVM -- there are no translated blocks. But the penguin-facing symbols
+ * still have to be in every library we ship, including libqemu-kvm-x86_64.so:
+ * scripts/check-delta-present.sh derives the required ABI from
+ * penguin-fastsnap.h and asserts every name is present in every system
+ * library, and penguin's own preflight refuses a run over an absent symbol.
+ * Dropping the file from the TCG-less build would turn "coverage does not
+ * apply here" into "this library is missing part of the ABI", which is a
+ * different and much more alarming report.
+ *
+ * So the file always builds and COV_ARM fails with a reason instead.
+ */
+#ifdef CONFIG_TCG
 #include "exec/tb-flush.h"
 #include "tcg/tcg-op-common.h"
+#endif
 
 #include "fastsnap/coverage.h"
 #include "fastsnap/penguin-fastsnap.h"
@@ -98,6 +116,8 @@ static inline uint8_t cov_bucket(uint8_t n)
     return 1 << 7;
 }
 
+#ifdef CONFIG_TCG
+
 void fastsnap_cov_translate(uint64_t pc)
 {
     TCGv_i32 prev, idx, cnt;
@@ -141,6 +161,43 @@ void fastsnap_cov_translate(uint64_t pc)
 
     tcg_gen_st_i32(tcg_constant_i32(cur >> 1), tcg_constant_ptr(&cov_prev), 0);
 }
+
+/*
+ * QUEUED, NOT CALLED, and the difference is an assertion failure.
+ *
+ * tb_flush__exclusive_or_serial() asserts
+ *     !runstate_is_running() || (current_cpu && cpu_in_serial_context(...))
+ * and neither holds at an arm. fastsnap_bh() deliberately stops the vCPUs with
+ * pause_all_vcpus() rather than vm_stop(), precisely so the runstate never
+ * enters RUN_STATE_RESTORE_VM and accel/tcg never forces a flush of its own --
+ * so runstate_is_running() is still true -- and we are on the main loop, so
+ * current_cpu is NULL. Calling it directly aborts QEMU.
+ *
+ * queue_tb_flush() defers it onto the vCPU's work queue via
+ * async_safe_run_on_cpu(), which runs it in exclusive context. The vCPUs are
+ * paused, so the flush happens when they resume and BEFORE they execute any
+ * further guest code -- which is the ordering this needs: every block that
+ * runs after an arm is translated after it, and so carries instrumentation.
+ */
+static void cov_flush_translations(void)
+{
+    if (first_cpu) {
+        queue_tb_flush(first_cpu);
+    }
+}
+
+#else  /* !CONFIG_TCG */
+
+void fastsnap_cov_translate(uint64_t pc)
+{
+    /* No translation happens under KVM, so nothing calls this. */
+}
+
+static void cov_flush_translations(void)
+{
+}
+
+#endif /* CONFIG_TCG */
 
 /*
  * One pass over the map: count this lap's edges and hits, work out what is
@@ -210,6 +267,13 @@ static void cov_scan(bool clear)
 
 int fastsnap_cov_arm(void)
 {
+#ifndef CONFIG_TCG
+    error_report("fastsnap: edge coverage needs TCG -- it is logged by ops "
+                 "emitted into translated blocks, and KVM translates nothing. "
+                 "Refusing rather than arming something that would report "
+                 "zero edges forever.");
+    return -1;
+#else
     if (!cov_map) {
         cov_map = g_try_malloc0(cov_map_size);
         cov_virgin = g_try_malloc0(cov_map_size);
@@ -228,29 +292,9 @@ int fastsnap_cov_arm(void)
     cov_tbs_instrumented = 0;
     cov_tbs_filtered = 0;
     cov_armed = true;
-
-    /*
-     * QUEUED, NOT CALLED, and the difference is an assertion failure.
-     *
-     * tb_flush__exclusive_or_serial() asserts
-     *     !runstate_is_running() || (current_cpu && cpu_in_serial_context(...))
-     * and neither holds here. fastsnap_bh() deliberately stops the vCPUs with
-     * pause_all_vcpus() rather than vm_stop(), precisely so the runstate never
-     * enters RUN_STATE_RESTORE_VM and accel/tcg never forces a flush -- so
-     * runstate_is_running() is still true -- and we are on the main loop, so
-     * current_cpu is NULL. Calling it directly here aborts QEMU.
-     *
-     * queue_tb_flush() defers it onto the vCPU's work queue via
-     * async_safe_run_on_cpu(), which runs it in exclusive context. The vCPUs
-     * are paused, so the flush happens when they resume and BEFORE they
-     * execute any further guest code -- which is the ordering this needs:
-     * every block that runs after an arm is translated after it, and so
-     * carries instrumentation.
-     */
-    if (first_cpu) {
-        queue_tb_flush(first_cpu);
-    }
+    cov_flush_translations();
     return 0;
+#endif
 }
 
 void fastsnap_cov_disarm(void)
@@ -259,9 +303,7 @@ void fastsnap_cov_disarm(void)
     /* Same reasoning as the arm: without a flush the blocks already
      * translated keep logging into the map after the caller believes it has
      * stopped, and a stale lap count is worse than no lap count. */
-    if (first_cpu) {
-        queue_tb_flush(first_cpu);
-    }
+    cov_flush_translations();
 }
 
 void fastsnap_cov_clear(void)
