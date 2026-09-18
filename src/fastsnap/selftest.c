@@ -1711,7 +1711,27 @@ static int fastsnap_selftest_coverage(void)
                e2, penguin_fastsnap_cov_total_edges());
     }
 
-    /* CONTROL D, negative: a cleared map reads zero. */
+    /*
+     * CONTROL D, negative: a cleared map reads zero.
+     *
+     * KNOWN RACY, AND OBSERVED FAILING ABOUT ONCE IN TEN BUILDS. CLEAR and
+     * READ are two separately scheduled ops, each waited for on its own
+     * bottom half, and coverage is still ARMED between them -- so the vCPU
+     * executes instrumented blocks in the gap and the "cleared" map can come
+     * back holding a couple of edges. On -M virt with no kernel the guest is
+     * in a tight loop over very few blocks, which is why it usually reads
+     * zero rather than why it should.
+     *
+     * Left as it is, deliberately. The two candidate fixes both cost more
+     * than the flake: merging clear-and-read into one op widens the ABI for a
+     * test, and disarming around the pair would reset the tbs counters that
+     * the filter and disarm controls below are about to read. What it needs
+     * is an op that summarises without the guest running, which is a real
+     * change and not one to make from inside a selftest.
+     *
+     * If this fires, re-run before investigating -- and if it fires often,
+     * that is a signal about the machine's block count, not about the clear.
+     */
     if (fastsnap_cov_do(PENGUIN_FASTSNAP_COV_CLEAR) < 0 ||
         fastsnap_cov_do(PENGUIN_FASTSNAP_COV_READ) < 0) {
         printf("fastsnap: FAIL - clear/read did not complete\n");
