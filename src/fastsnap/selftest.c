@@ -1507,6 +1507,100 @@ static int fastsnap_selftest_cov_hash(void)
     return failures;
 }
 
+/*
+ * The summarising pass, against the implementation it replaced.
+ *
+ * WHY THIS ONE GETS AN ORACLE AND THE REST GET CONTROLS. Everything else in
+ * the coverage phase is arranged so that the failure shows up as a zero --
+ * an empty map, no instrumented blocks, no edges after a disarm -- because a
+ * zero is a thing a test can insist on. The scan is not like that. It walks
+ * set bytes with ctz64 and folds them into the cumulative map with a shift;
+ * get either slightly wrong and the result is not a zero, it is a NUMBER of
+ * the right order of magnitude, with a cumulative map that keeps filling.
+ * Nothing downstream would reject it. The campaign would simply explore less
+ * than it should, forever, and the scan would be the last place anyone looked.
+ *
+ * So the previous implementation is kept in coverage.c and both are run over
+ * the same synthetic maps here. Agreement is demanded on the counts AND on
+ * the two maps byte-for-byte, because the counts can agree while the bytes do
+ * not -- which is precisely what a host-byte-order mistake in the ctz walk
+ * would produce, and this file is compiled for big-endian hosts too.
+ *
+ * THE TIMING IS NOT A GATE. It is printed because the rewrite exists for it,
+ * and because a "fast" path that is not faster on this host is worth seeing;
+ * but the assertion is only that it is not slower, and a loose one at that.
+ * Nix builders are shared and a strict speedup threshold here would be a test
+ * that fails for reasons having nothing to do with the code.
+ */
+static int fastsnap_selftest_cov_scan(void)
+{
+    /*
+     * map size, edges drawn, packed, reps. Five shapes, and three of them are
+     * there to measure rather than to gate:
+     *
+     *   1 MiB / 0        the skim floor. Every word read, nothing folded.
+     *                    This is the term that is O(map size) no matter what
+     *                    the guest did, and the only way to see it alone.
+     *   1 MiB / 2800     the production shape: the map size and the per-lap
+     *                    occupancy the real workload produces.
+     *   1 MiB / 2800 P   the SAME edges in an eighth as many words. If the
+     *                    cost of folding tracks set bytes this matches the
+     *                    row above; if it tracks non-zero words it collapses
+     *                    towards the skim floor. The published cost model
+     *                    cannot distinguish those, because every run it was
+     *                    fitted on had one set byte per non-zero word.
+     *   64 KiB / 4800    dense small map: skim negligible, fold dominant.
+     *   256 B / 40       the smallest map the ABI accepts, where an
+     *                    off-by-one in the skim chunking would show.
+     */
+    static const struct {
+        uint32_t map_size;
+        uint32_t edges;
+        bool packed;
+        bool saturate;
+        unsigned reps;
+    } shapes[] = {
+        { 1u << 20,    0, false, false, 40 },
+        { 1u << 20, 2800, false, false, 40 },
+        { 1u << 20, 2800, false, true,  40 },
+        { 1u << 20, 2800, true,  false, 40 },
+        { 1u << 16, 4800, false, false, 40 },
+        { 1u << 16, 4800, false, true,  40 },
+        { 1u << 8,    40, false, false,  4 },
+    };
+    int failures = 0;
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE(shapes); i++) {
+        FastsnapCovScanCheck c;
+
+        if (!fastsnap_cov_scan_selfcheck(shapes[i].map_size, shapes[i].edges,
+                                         shapes[i].packed,
+                                         shapes[i].saturate,
+                                         shapes[i].reps, &c)) {
+            printf("fastsnap: FAIL - the summarising pass disagrees with its "
+                   "reference on a %u-byte map: %s differs. Every edge count "
+                   "this build reports is suspect.\n",
+                   shapes[i].map_size,
+                   c.mismatch ? c.mismatch : "something unnamed");
+            failures++;
+            continue;
+        }
+        printf("fastsnap: control OK - scan matches its reference exactly on "
+               "a %u-byte map, %s (%" PRIu64 " edges in %" PRIu64 " words, "
+               "%" PRIu64 " new, %" PRIu64 " new buckets)\n"
+               "fastsnap:   ns/pass: shipped %" PRIu64 ", skim %" PRIu64
+               ", branchless %" PRIu64 ", shipped-again %" PRIu64 "\n",
+               shapes[i].map_size,
+               shapes[i].saturate ? "saturated history"
+                                  : (shapes[i].packed ? "packed" : "spread"),
+               c.edges, c.nonzero_words, c.new_edges, c.new_buckets,
+               c.shipped_ns, c.chunked_ns, c.branchless_ns, c.control_ns);
+
+    }
+    return failures;
+}
+
 static int fastsnap_selftest_coverage(void)
 {
 #ifndef CONFIG_TCG
@@ -1961,6 +2055,7 @@ static void fastsnap_on_running(void *opaque, bool running, RunState state)
     failures += fastsnap_selftest_loop();
     failures += fastsnap_selftest_allowlist();
     failures += fastsnap_selftest_coverage();
+    failures += fastsnap_selftest_cov_scan();
     printf("fastsnap: SELFTEST %s\n", failures ? "FAILED" : "PASSED");
     fflush(stdout);
     /* _exit, not exit: returning through QEMU's atexit teardown from a

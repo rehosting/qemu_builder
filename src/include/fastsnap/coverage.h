@@ -140,4 +140,44 @@ bool fastsnap_cov_clear_on_reset(void);
  */
 uint32_t fastsnap_cov_block_index(uint64_t pc);
 
+/*
+ * The summarising pass exists twice: the one that runs in the loop, and the
+ * obvious implementation it replaced. This runs both over a synthetic map and
+ * requires them to agree exactly -- on the four counters, on the cumulative
+ * map they produce, and on the cleared lap map -- then times them, paired.
+ *
+ * Exposed for the selftest, and it is worth saying why this one needs an
+ * oracle at all when the rest of the file settles for controls. Every other
+ * failure mode here reads as a zero, and a zero is checkable. A scan that
+ * walks set bytes slightly wrong reads as a NUMBER: the right order of
+ * magnitude of edges, a plausible hit total, a cumulative map that grows.
+ * Nothing downstream would reject it, and the only symptom would be a
+ * campaign that explores less than it should, indefinitely.
+ *
+ * Returns true when the two agree. @out->mismatch names what differed when
+ * they do not, and is NULL when they do not differ.
+ */
+typedef struct FastsnapCovScanCheck {
+    uint64_t nwords;        /* map size in 64-bit words */
+    uint64_t set_bytes;     /* distinct edges actually set in the last round */
+    uint64_t nonzero_words; /* how many words those bytes occupy */
+    uint64_t edges;         /* what both folds counted */
+    uint64_t new_edges;
+    uint64_t new_buckets;
+    uint64_t shipped_ns;    /* mean ns per pass, the scan that ships */
+    uint64_t chunked_ns;    /* candidate: eight words skimmed at a time */
+    uint64_t branchless_ns; /* candidate: byte fold with no data branches */
+    uint64_t control_ns;    /* the shipped scan AGAIN, timed last. If this
+                             * does not match shipped_ns, the four numbers
+                             * above are an artefact of slot order, not of
+                             * the implementations. */
+    unsigned reps;
+    const char *mismatch;   /* NULL when the two agree */
+} FastsnapCovScanCheck;
+
+bool fastsnap_cov_scan_selfcheck(uint32_t map_size, uint32_t edges,
+                                 bool packed, bool saturate,
+                                 unsigned reps,
+                                 FastsnapCovScanCheck *out);
+
 #endif /* FASTSNAP_COVERAGE_H */

@@ -188,6 +188,19 @@ stdenv.mkDerivation {
       echo "in which case no allowlist measurement built on it means anything."
       exit 1
     }
+    # The summarising pass, against the implementation it replaced. This is
+    # the one mechanism in the coverage phase whose failure is not a zero: a
+    # ctz walk that skips a byte, or folds into the wrong half of a word on a
+    # big-endian host, returns a plausible edge count and a cumulative map
+    # that keeps filling. Nothing downstream rejects it. All three shapes must
+    # report, so a build that quietly stops checking one is a failure too.
+    n=$(grep -c '^fastsnap: control OK - scan matches its reference exactly' selftest.log || true)
+    [ "$n" = 7 ] || {
+      echo "the scan differential check reported $n of 7 shapes. The fast scan"
+      echo "is only equivalent to the reference by assertion; unchecked, a"
+      echo "wrong one reads as a slightly less productive campaign, forever."
+      exit 1
+    }
     grep -q 'no RUN_STATE_RESTORE_VM transition' selftest.log || {
         echo "FAIL: the no-tb_flush assertion did not run" >&2; exit 1; }
     grep -q '^fastsnap: scheduled restore ' selftest.log || {
