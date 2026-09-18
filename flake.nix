@@ -2,7 +2,17 @@
   description = "penguin-qemu: upstream QEMU release + the IGLOO patch series";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Pinned to the exact revision penguin pins, not a channel branch, and for
+    # penguin's reason rather than ours: penguin consumes this flake with
+    # `inputs.nixpkgs.follows`, so the artifact it ships is ALWAYS built against
+    # penguin's nixpkgs no matter what we pin here. Tracking nixos-unstable
+    # therefore meant this repo's CI was green about a build nobody consumes.
+    # That is not hypothetical -- the QEMU 11.1 float_status/cffi breakage was
+    # invisible to every gate here and showed up the first time the artifact was
+    # built the way penguin builds it, because the compiled CFFI env modules
+    # must match penguin's CPython (3.13) to be loadable at all.
+    # Bump this together with penguin's pin, never on its own.
+    nixpkgs.url = "github:NixOS/nixpkgs/b6067cc0127d4db9c26c79e4de0513e58d0c40c9";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
