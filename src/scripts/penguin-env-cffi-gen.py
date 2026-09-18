@@ -391,10 +391,22 @@ class ApiCdefEmitter:
                 continue
             ctype, suffix = rendered
             if bits is not None:
-                if mname is None or suffix:
-                    if not partial:
-                        return None
+                # cffi rejects a struct that carries BOTH bitfields and a
+                # trailing `...;` ("using both bitfields and '...;'"), and the
+                # ellipsis is what makes the compiler -- not us -- fix the
+                # layout. So under partial=True the bitfield is dropped rather
+                # than declared; the ABI-header path above already drops
+                # bitfields for the same reason, so the two agree. Without
+                # this, QEMU >= 11.1's all-bitfield `float_status` cost the
+                # compiled env module on 9 of 11 system targets.
+                if partial:
+                    self.warnings.append(
+                        f"api: {self.x._die_name(die) or '<anon>'}."
+                        f"{mname or '<anon>'} bitfield dropped "
+                        "(cffi forbids bitfields alongside `...`)")
                     continue
+                if mname is None or suffix:
+                    return None
                 lines.append(f"{indent}{ctype} {mname} : {bits.value};")
             elif mname is None:
                 # Anonymous struct/union member: keep it anonymous so
