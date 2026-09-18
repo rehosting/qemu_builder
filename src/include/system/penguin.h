@@ -8,6 +8,7 @@
 #define QEMU_SYSTEM_PENGUIN_H
 
 #include "qemu/typedefs.h"
+#include "qapi/qapi-types-run-state.h" /* ShutdownCause */
 
 typedef int (*penguin_guest_hypercall_cb_t)(CPUState *cs, uint64_t nr,
                                             uint64_t a0, uint64_t a1,
@@ -87,6 +88,16 @@ void penguin_schedule_snapshot(const char *name, bool load);
  * Penguin to tear down and reinitialize plugins before QEMU resets the VM.
  */
 typedef void (*penguin_reset_request_cb_t)(int reason, void *opaque);
+
+/*
+ * Invoked from qemu_system_reset_request() in system/runstate.c. Declared
+ * here rather than as a function-local extern at the call site: a git-tree
+ * build turns on -Werror, and the local extern trips both -Wnested-externs
+ * there and -Wmissing-prototypes on the definition in system/penguin.c.
+ * Invisible in the shipped build only because nix builds from an unpacked
+ * tarball, where QEMU leaves -Werror off.
+ */
+void penguin_invoke_reset_request_callback(ShutdownCause reason);
 void set_penguin_reset_request_callback(penguin_reset_request_cb_t cb,
                                          void *opaque);
 

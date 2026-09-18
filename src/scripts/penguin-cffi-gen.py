@@ -135,6 +135,66 @@ void penguin_schedule_snapshot(const char *name, bool load);
 void set_penguin_reset_request_callback(penguin_reset_request_cb_t cb, void *opaque);
 void set_penguin_qmp_callback(penguin_qmp_cb_t cb, void *opaque);
 bool penguin_handle_qmp(const char *command, const char *args, char **result);
+
+/*
+ * fastsnap: device state in a block. Saves every non-iterative savevm section
+ * into one heap buffer and restores from it, with no migration stream and no
+ * qcow2 -- the device half of a fast in-process snapshot restore.
+ *
+ * device_save_kind()/device_restore_all() need the BQL held AND the vCPUs
+ * stopped: they walk live device state. From a Penguin pyplugin that means
+ * scheduling onto the main loop, the same constraint penguin_load_snapshot()
+ * has.
+ *
+ * device_list_all() returns a NULL-terminated array whose strings point into
+ * QEMU's own handler list -- do not free the strings, and do not hold them
+ * across a device hot-unplug.
+ */
+typedef struct DeviceSaveState {{
+    uint8_t kind;
+    uint8_t *save_buffer;
+    size_t save_buffer_size;
+}} DeviceSaveState;
+
+typedef enum DeviceSnapshotKind {{
+    DEVICE_SNAPSHOT_ALL,
+    DEVICE_SNAPSHOT_ALLOWLIST,
+    DEVICE_SNAPSHOT_DENYLIST
+}} DeviceSnapshotKind;
+
+DeviceSaveState *device_save_all(void);
+DeviceSaveState *device_save_kind(DeviceSnapshotKind kind, char **names);
+void device_restore_all(DeviceSaveState *dss);
+void device_free_all(DeviceSaveState *dss);
+char **device_list_all(void);
+bool fastsnap_devices_is_restoring(void);
+
+/*
+ * The scheduled form, and the one Penguin should actually use. The calls above
+ * need the BQL held AND the vCPUs stopped; a pyplugin callback runs on a vCPU
+ * thread inside a hypercall and has neither, so this defers the work to the
+ * main loop the way penguin_schedule_snapshot() does.
+ *
+ * It deliberately does NOT go through vm_stop(RUN_STATE_RESTORE_VM), which is
+ * what penguin_load_snapshot() uses and what makes accel/tcg flush every
+ * translation block. A device-only restore changes no RAM, so no translated
+ * block can go stale and the flush is unnecessary rather than merely costly.
+ *
+ * Fire-and-forget. Poll penguin_fastsnap_seq() for completion, then read
+ * penguin_fastsnap_last_rc() and the accessors. op: 0 take, 1 restore,
+ * 2 release, 3 probe, 4 restore-and-verify. Duration is measured in C because
+ * the operations are tens of microseconds and a pyplugin round trip is
+ * hundreds.
+ */
+void penguin_fastsnap_set_denylist(const char *csv);
+const char *penguin_fastsnap_section_names(void);
+void penguin_fastsnap_schedule(int op);
+uint64_t penguin_fastsnap_seq(void);
+int penguin_fastsnap_last_rc(void);
+int64_t penguin_fastsnap_last_us(void);
+uint64_t penguin_fastsnap_last_digest(void);
+uint64_t penguin_fastsnap_block_size(void);
+int penguin_fastsnap_section_count(void);
 """
 
 

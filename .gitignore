@@ -4,3 +4,5 @@ build-system/
 build-kvm/
 pyvenv/
 *.tar.gz
+built
+selftest*
