@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Fri, 18 Sep 2026 23:42:15 -0400
+Subject: [PATCH] hw/arm: wire the AT91SAM9260 board into the build
+
+Adds CONFIG_AT91SAM9 (default y, TCG+ARM) and compiles src/hw/arm/at91sam9260.c
+into arm_common_ss. Parallels the penguin.c build-wiring in patch 0001: the
+board .c is a vendored authored file, this patch only references it from the
+upstream meson.build/Kconfig.
+---
+ hw/arm/Kconfig     | 6 ++++++
+ hw/arm/meson.build | 1 +
+ 2 files changed, 7 insertions(+)
+
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index 82e0bc2e7004384f98c407122c285fa43ab410f4..2c8cef70394c47b8e948c1f2e27654da5dcfadb3 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -243,6 +243,12 @@ config SX1
+     depends on TCG && ARM
+     select OMAP
+ 
++config AT91SAM9
++    bool
++    default y
++    depends on TCG && ARM
++    select CADENCE
++
+ config VERSATILE
+     bool
+     default y
+diff --git a/hw/arm/meson.build b/hw/arm/meson.build
+index 4233a800be2b060cbed97c5a4ad4ac775a5afbb3..ab7db432988cac1a44446f4e6eaedd4659872e54 100644
+--- a/hw/arm/meson.build
++++ b/hw/arm/meson.build
+@@ -108,6 +108,7 @@ arm_common_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2838_peripherals.c'))
+ arm_common_ss.add(when: 'CONFIG_STRONGARM', if_true: files('strongarm.c'))
+ arm_common_ss.add(when: 'CONFIG_SX1', if_true: files('omap_sx1.c'))
+ arm_common_ss.add(when: 'CONFIG_VERSATILE', if_true: files('versatilepb.c'))
++arm_common_ss.add(when: 'CONFIG_AT91SAM9', if_true: files('at91sam9260.c'))
+ arm_common_ss.add(when: 'CONFIG_VEXPRESS', if_true: files('vexpress.c'))
+ 
+ arm_common_ss.add(files('boot.c'))
