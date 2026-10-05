@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: igloo <nix@local>
+Date: Fri, 11 Sep 2026 00:50:38 -0400
+Subject: [PATCH] system/runstate: declare the Penguin reset hook instead of
+ externing it
+
+0011 calls penguin_invoke_reset_request_callback() through a function-local
+extern. That trips -Wnested-externs at the call site and -Wmissing-prototypes
+on the definition in system/penguin.c, so the series does not build with
+-Werror.
+
+It has never shown up because nix builds from an unpacked tarball, where QEMU
+leaves -Werror off; a development tree made by import-series.sh is a git repo,
+where QEMU turns it on. So `nix build` is green while the tree every developer
+actually works in does not compile.
+
+The declaration goes in include/system/penguin.h, which is a src/ file, so
+only the call site is a series change.
+
+License: MIT
+Patch-Set: igloo-core
+---
+ system/runstate.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/system/runstate.c b/system/runstate.c
+index 569841239f1dee0918a65cd85fc2da6f425d6eef..3ab33a8df19257df5ffde8df4db091ae691be8fa 100644
+--- a/system/runstate.c
++++ b/system/runstate.c
+@@ -53,6 +53,7 @@
+ #include "qom/object.h"
+ #include "qom/object_interfaces.h"
+ #include "system/cpus.h"
++#include "system/penguin.h"
+ #include "system/qtest.h"
+ #include "system/replay.h"
+ #include "system/reset.h"
+@@ -736,7 +737,6 @@ void qemu_system_guest_pvshutdown(void)
+ 
+ void qemu_system_reset_request(ShutdownCause reason)
+ {
+-    extern void penguin_invoke_reset_request_callback(ShutdownCause reason);
+     penguin_invoke_reset_request_callback(reason);
+ 
+     if (reboot_action == REBOOT_ACTION_SHUTDOWN &&

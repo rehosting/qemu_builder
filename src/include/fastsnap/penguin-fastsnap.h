@@ -1,0 +1,325 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * The Penguin-facing C ABI for the device block. See penguin-fastsnap.c for
+ * why these exist rather than exporting device_save_all() directly -- briefly:
+ * they schedule onto the main loop, and they deliberately do not go through
+ * vm_stop(RUN_STATE_RESTORE_VM), which is what makes accel/tcg flush every
+ * translation block.
+ *
+ * Fire-and-forget. Poll penguin_fastsnap_seq() for completion, then read
+ * penguin_fastsnap_last_rc() and the accessors.
+ */
+#ifndef FASTSNAP_PENGUIN_FASTSNAP_H
+#define FASTSNAP_PENGUIN_FASTSNAP_H
+
+#include "qemu/osdep.h"
+
+#define PENGUIN_FASTSNAP_TAKE    0
+#define PENGUIN_FASTSNAP_RESTORE 1
+#define PENGUIN_FASTSNAP_RELEASE 2
+#define PENGUIN_FASTSNAP_PROBE   3
+/*
+ * Restore, then digest the result WITHOUT letting the guest run in between.
+ *
+ * PROBE alone cannot verify a restore. A caller schedules RESTORE, and the
+ * earliest it can schedule PROBE is from a later guest event -- by which time
+ * the guest has executed and cpu/timer state has moved again, so the digest
+ * can never match the one the block was taken at. The comparison only means
+ * anything if both sides are sampled with the vCPUs stopped, which is what
+ * this op is for: restore and re-serialise in the same bottom half.
+ *
+ * TAKE leaves last_digest() as the digest OF THE BLOCK, so the pair is:
+ *     take  -> A = digest of what was captured
+ *     ...guest runs...
+ *     probe -> B, must differ from A or the probe is blind
+ *     restore_verify -> C, must equal A
+ * last_us() still reports the restore alone; the verifying save happens after
+ * the clock is stopped, so it does not inflate the timing.
+ */
+#define PENGUIN_FASTSNAP_RESTORE_VERIFY 4
+
+/*
+ * Digest the WHOLE guest state -- every RAM block, then the device block --
+ * with the vCPUs stopped.
+ *
+ * This exists because neither of the two channels we already have can see a
+ * corrupt guest. The device block digest covers devices only, by construction.
+ * And crashes.yaml is blind to kernel-side damage: measured on real firmware,
+ * a run with 98 lines of kernel panic, swap_dup and OOM-kill in its console
+ * produced a crashes.yaml identical in shape to a healthy run, because that
+ * plugin hooks userspace fatal signals and a panic is not one. See
+ * penguin/analysis/fastsnap/CRASHES.md.
+ *
+ * So "no crashes recorded" is not evidence the guest is healthy, and this is
+ * the signal that does not depend on the guest being well enough to deliver a
+ * signal. Two runs that executed the same thing from the same state must agree
+ * here; if they do not, one of them is corrupt, whatever crashes.yaml says.
+ *
+ * last_digest() reports the device half and last_ram_digest() the RAM half,
+ * kept separate so a divergence says WHICH half moved. last_us() times both.
+ */
+#define PENGUIN_FASTSNAP_STATE_DIGEST 5
+
+/*
+ * The fork oracle: a reference copy of the whole guest that the fast path
+ * cannot have touched, and a page-level diff against it.
+ *
+ * WHY A FORK AND NOT JUST A DIGEST. A digest taken before and after answers
+ * "did the state come back", which the ops above already do. It cannot answer
+ * "come back WHERE", and a reset that leaves twelve pages wrong is exactly the
+ * failure mode that matters -- it is what a dirty-tracking bug looks like, and
+ * a hash tells you only that something moved.
+ *
+ * FORK_REF forks at the safe point where the vCPUs are already stopped. The
+ * child blocks every signal and parks in pause(); it touches nothing, so its
+ * copy of guest RAM stays byte-identical to the moment of the fork. It also
+ * deliberately never runs the guest, which is what makes this cheap: there are
+ * no vCPU threads to recreate in a child that fork() left single-threaded.
+ *
+ * FORK_DIFF then reads the child's memory back with process_vm_readv() -- fork
+ * preserves the address-space layout, so a RAMBlock sits at the same host
+ * address in both -- and compares page by page. What comes out is a count and
+ * the first few differing guest addresses.
+ *
+ * THE CORRECTNESS CONDITION, checked rather than assumed: this works only
+ * because guest RAM is MAP_PRIVATE, so the child gets copy-on-write. A RAM
+ * block created shared (memory-backend-file with share=on, vhost-user) is the
+ * SAME memory in both processes, and the "reference" would silently track the
+ * parent's live state and report zero differences forever. FORK_REF refuses if
+ * any block carries RAM_SHARED rather than producing that.
+ *
+ * Ordering: FORK_REF at the snapshot point, let the guest run, reset, then
+ * FORK_DIFF. Zero differing pages means the reset put every byte back.
+ * FORK_DROP reaps the child; a reference left parked holds a full CoW copy of
+ * guest RAM, so drop it when done.
+ */
+#define PENGUIN_FASTSNAP_FORK_REF  6
+#define PENGUIN_FASTSNAP_FORK_DIFF 7
+#define PENGUIN_FASTSNAP_FORK_DROP 8
+
+/*
+ * How many guest pages one stretch of execution writes to.
+ *
+ * This is the input the reset cost model has been assuming rather than
+ * measuring. RESET.md's host-side numbers put a 256 MB guest at 79 us to
+ * restore a 1 MB dirty set and 2,136 us for a 16 MB one; the projected
+ * ~1,000 exec/s and the claim that 8 instances fit in memory bandwidth both
+ * rest on the middle column being right, and nothing had asked the guest.
+ *
+ * DIRTY_ARM arms QEMU's own migration dirty bitmap and zeroes the accumulated
+ * set -- the clear IS the arm, because TCG re-marks a page's TLB entry
+ * TLB_NOTDIRTY only once its dirty bits are gone. DIRTY_COUNT reads the set
+ * accumulated since the last arm or count and clears it again, so a loop of
+ * COUNTs yields one number per interval without re-arming. DIRTY_STOP
+ * disarms.
+ *
+ * Read with penguin_fastsnap_dirty_pages(), which is a count of target pages;
+ * penguin_fastsnap_dirty_page_size() gives the multiplier, and
+ * penguin_fastsnap_dirty_pages_scanned() says how many pages were examined,
+ * so "0 dirty" is distinguishable from "looked at nothing".
+ * penguin_fastsnap_dirty_blocks() breaks the count down per RAMBlock, which
+ * is what separates a guest working set from a flash write, and
+ * penguin_fastsnap_dirty_report() names the first few dirty pages.
+ *
+ * Measure with no savevm/loadvm in the interval: the migration code walks and
+ * clears the same bitmap, and a restore rewrites RAM wholesale.
+ */
+#define PENGUIN_FASTSNAP_DIRTY_ARM   9
+#define PENGUIN_FASTSNAP_DIRTY_COUNT 10
+#define PENGUIN_FASTSNAP_DIRTY_STOP  11
+
+/*
+ * The RAM half, and with it a complete reset.
+ *
+ * RAM_SNAPSHOT copies every RAM block and arms dirty tracking in one operation
+ * -- separate ops would let the guest run in the gap between them and lose
+ * those writes silently. RAM_RESTORE copies back the pages dirtied since,
+ * invalidates translated code for exactly those ranges, and re-arms.
+ *
+ * A complete reset is RESTORE (devices) followed by RAM_RESTORE. Neither half
+ * is sound alone: restoring devices without RAM rewinds the CPU's page-table
+ * base into RAM that was never rewound, which destroys a real guest within a
+ * handful of restores.
+ */
+#define PENGUIN_FASTSNAP_RAM_SNAPSHOT 12
+#define PENGUIN_FASTSNAP_RAM_RESTORE  13
+#define PENGUIN_FASTSNAP_RAM_RELEASE  14
+
+/*
+ * A complete reset, as two operations.
+ *
+ * LOOP_ARM takes the device block, snapshots RAM and arms dirty tracking, and
+ * forks the reference -- all inside one bottom half. They cannot be separate
+ * calls, and the reason is not tidiness. The guest executes between bottom
+ * halves, so a fork reference taken even one op after the RAM snapshot holds a
+ * DIFFERENT moment than the snapshot does. Every later comparison would then
+ * find the pages the guest touched in that gap and report a failing reset
+ * forever, for a reset that was correct. Taking them together is what makes
+ * "zero differing pages" the right answer rather than an unreachable one.
+ *
+ * LOOP_RESET is the reset itself: device block, then the dirty RAM pages.
+ *
+ * The loop is then: LOOP_ARM, run the guest, LOOP_RESET, run the guest again.
+ * FORK_DIFF at any point after a LOOP_RESET must report zero differing pages;
+ * anything else is the reset failing to put the guest back.
+ */
+#define PENGUIN_FASTSNAP_LOOP_ARM   15
+#define PENGUIN_FASTSNAP_LOOP_RESET 16
+
+/*
+ * Reset, then diff against the fork reference WITHOUT letting the guest run
+ * in between.
+ *
+ * The same argument as RESTORE_VERIFY, and it is not a convenience. Each op
+ * runs in its own bottom half and the guest executes between bottom halves, so
+ * a FORK_DIFF scheduled after a LOOP_RESET reports the pages the guest dirtied
+ * in the gap -- on a booted firmware image that is a few hundred pages of
+ * ordinary kernel work. A correct reset would therefore be indistinguishable
+ * from a broken one on a live target, and the oracle would be usable only on a
+ * machine that is not running, which is not the machine whose reset we care
+ * about.
+ *
+ * Doing both in one bottom half makes "zero differing pages" the right answer
+ * on a live guest rather than an unreachable one.
+ *
+ * last_us() reports the RESET alone. The diff reads back the whole of guest
+ * RAM through process_vm_readv() and costs tens of milliseconds, so folding it
+ * into the timing would make the reset look two orders of magnitude more
+ * expensive than it is -- and it is the reset, not the oracle, that a loop
+ * pays for every iteration. Read the diff cost from diff_us().
+ */
+#define PENGUIN_FASTSNAP_LOOP_RESET_VERIFY 17
+
+/*
+ * SCOPING THE DEVICE BLOCK, and why the second oracle exists.
+ *
+ * The device half is the larger half of a reset by an order of magnitude:
+ * measured, seventeen sections restore in 0.752 ms and {cpu, timer} in
+ * 0.043 ms, against a RAM half of tens of microseconds. So an allowlist is the
+ * biggest single lever on iteration rate -- and the most dangerous knob in this
+ * ABI, because a section left out does not fail. It drifts, and the guest
+ * misbehaves some thousands of iterations later with nothing pointing back.
+ *
+ * penguin_fastsnap_dev_diff_sections() is the check that makes it usable.
+ * LOOP_ARM records a digest of EVERY section, whatever the block is scoped to;
+ * LOOP_RESET_VERIFY re-digests them after the reset and reports which differ.
+ * Zero means the reset put back everything, including what the allowlist
+ * omitted -- which is the case that licenses the allowlist, because a section
+ * the workload never touches costs nothing to skip.
+ *
+ * Note what this is NOT. It is one workload's answer, and a section can be
+ * unchanged for thousands of laps and change on the next input; that is why
+ * the count is reported per verification lap rather than checked once. A
+ * denylist stays the conservative default.
+ */
+/*
+ * Edge coverage, filled by code emitted into every translated block.
+ *
+ * The loop could reset a guest and feed it a mutated input long before it
+ * could notice that an input reached somewhere new -- and without that, an
+ * exec/s figure is a loop rate, not a fuzzing rate. The peers it gets
+ * compared to (Nyx, FIRM-AFL) are coverage-guided; a rate measured without
+ * the feedback they include is not the same quantity. This is that half.
+ *
+ * COV_ARM allocates the map on first use, zeroes it, starts instrumenting,
+ * and queues a tb_flush -- necessary, because instrumentation is emitted at
+ * TRANSLATION time and a block already cached would never acquire any.
+ * COV_CLEAR zeroes the per-lap map. COV_READ summarises without clearing.
+ * COV_DISARM stops instrumenting new blocks (and flushes, for the same
+ * reason). The map is allocated once and NEVER freed or resized: its address
+ * is materialised as a constant inside every instrumented block.
+ *
+ * In the loop, none of these run per lap. LOOP_RESET and LOOP_RESET_VERIFY
+ * summarise and clear the map as part of the reset when
+ * penguin_fastsnap_cov_set_clear_on_reset() is on (it is by default), so a
+ * lap costs one scan and no extra scheduled op -- an op being the more
+ * expensive of the two by a wide margin on this lane.
+ *
+ * Read penguin_fastsnap_cov_new_buckets() for "did this input do anything
+ * interesting", and penguin_fastsnap_cov_tbs_instrumented() before believing
+ * any zero: an empty map means either the guest found nothing or the address
+ * filter names a range the target's code never occupies, and the map alone
+ * cannot tell those apart.
+ */
+#define PENGUIN_FASTSNAP_COV_ARM    18
+#define PENGUIN_FASTSNAP_COV_CLEAR  19
+#define PENGUIN_FASTSNAP_COV_READ   20
+#define PENGUIN_FASTSNAP_COV_DISARM 21
+
+void penguin_fastsnap_cov_set_filter(uint64_t lo, uint64_t hi);
+bool penguin_fastsnap_cov_set_map_size(uint64_t size);
+void penguin_fastsnap_cov_set_clear_on_reset(bool on);
+uint64_t penguin_fastsnap_cov_map_addr(void);
+uint64_t penguin_fastsnap_cov_map_size(void);
+bool penguin_fastsnap_cov_armed(void);
+uint64_t penguin_fastsnap_cov_edges(void);
+uint64_t penguin_fastsnap_cov_hits(void);
+uint64_t penguin_fastsnap_cov_new_edges(void);
+uint64_t penguin_fastsnap_cov_new_buckets(void);
+uint64_t penguin_fastsnap_cov_total_edges(void);
+uint64_t penguin_fastsnap_cov_tbs_instrumented(void);
+uint64_t penguin_fastsnap_cov_tbs_filtered(void);
+int64_t penguin_fastsnap_cov_scan_us(void);
+
+void penguin_fastsnap_set_denylist(const char *csv);
+void penguin_fastsnap_set_allowlist(const char *csv);
+const char *penguin_fastsnap_section_names(void);
+void penguin_fastsnap_schedule(int op);
+uint64_t penguin_fastsnap_seq(void);
+int penguin_fastsnap_last_rc(void);
+int64_t penguin_fastsnap_last_us(void);
+int64_t penguin_fastsnap_bh_done_us(void);
+uint64_t penguin_fastsnap_last_digest(void);
+uint64_t penguin_fastsnap_last_ram_digest(void);
+uint64_t penguin_fastsnap_diff_pages(void);
+int64_t penguin_fastsnap_diff_us(void);
+uint64_t penguin_fastsnap_ram_restored_pages(void);
+
+/*
+ * Reset cost measured in WORK, not wall clock: TCG's own counters plus how
+ * overbroad the RAM restore was. All cumulative since process start; take
+ * deltas. Zero under KVM and in a build without TCG.
+ *
+ * penguin_fastsnap_ram_pages_unchanged() is only counted when the environment
+ * variable FASTSNAP_COUNT_UNCHANGED is set -- it costs a memcmp per restored
+ * page -- and reads 0 otherwise, which looks exactly like "every restored page
+ * differed". Read it together with the variable you set.
+ */
+uint64_t penguin_fastsnap_tb_flush_count(void);
+uint64_t penguin_fastsnap_tb_invalidate_count(void);
+uint64_t penguin_fastsnap_tlb_full_flush_count(void);
+uint64_t penguin_fastsnap_tlb_part_flush_count(void);
+uint64_t penguin_fastsnap_tlb_elide_flush_count(void);
+uint64_t penguin_fastsnap_ram_pages_unchanged(void);
+uint64_t penguin_fastsnap_ram_pages_invalidated(void);
+uint64_t penguin_fastsnap_ram_pages_skipped_nocode(void);
+uint64_t penguin_fastsnap_ram_snapshot_bytes(void);
+uint64_t penguin_fastsnap_diff_bytes_checked(void);
+const char *penguin_fastsnap_diff_report(void);
+
+/* How the last fork-oracle comparison reached its answer: pages proven equal
+ * by PFN identity (never read) and pages actually read back and compared.
+ * pagemap_status: 1 active, 0 disabled by FASTSNAP_FORK_PAGEMAP, -1
+ * unavailable -- PFNs read as zero without CAP_SYS_ADMIN. */
+uint64_t penguin_fastsnap_diff_pages_proved(void);
+uint64_t penguin_fastsnap_diff_pages_read(void);
+int penguin_fastsnap_diff_pagemap_status(void);
+uint64_t penguin_fastsnap_dirty_pages(void);
+uint64_t penguin_fastsnap_dirty_pages_scanned(void);
+uint64_t penguin_fastsnap_dirty_page_size(void);
+const char *penguin_fastsnap_dirty_report(void);
+const char *penguin_fastsnap_dirty_blocks(void);
+uint64_t penguin_fastsnap_block_size(void);
+int penguin_fastsnap_section_count(void);
+int penguin_fastsnap_dev_diff_sections(void);
+int penguin_fastsnap_dev_unrestorable_sections(void);
+const char *penguin_fastsnap_dev_diff_report(void);
+/*
+ * Report format: comma-separated "<flags><idstr>#<index>". '*' means the
+ * section WAS in the block (so it is unrestorable, not a scope miss), '!'
+ * means the handler list itself changed under the comparison. The index is
+ * part of the identity because section ids repeat.
+ */
+
+#endif /* FASTSNAP_PENGUIN_FASTSNAP_H */

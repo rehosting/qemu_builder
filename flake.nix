@@ -61,10 +61,24 @@
           inherit src extraBuildInputs;
           version = "${base.tag}-igloo";
         };
+
+        # The one behavioural gate in this repo: builds a single aarch64 target
+        # with a real binary and runs src/fastsnap/selftest.c against it.
+        fastsnap-selftest = pkgs.callPackage ./nix/fastsnap-selftest.nix {
+          inherit src;
+        };
+
+        # The link gate. Narrower than the selftest and cheaper: it never runs
+        # the binary, it only proves one can be produced with CONFIG_TCG off.
+        # That is the configuration the image build ships as libqemu-kvm-*.so
+        # and the one no check here could see until it broke downstream.
+        fastsnap-kvm-link = pkgs.callPackage ./nix/fastsnap-kvm-link.nix {
+          inherit src;
+        };
       in
       {
         packages = {
-          inherit penguin-qemu src;
+          inherit penguin-qemu src fastsnap-selftest fastsnap-kvm-link;
 
           # Introspection for scripts/check-config-contract.sh: the store paths
           # of the libraries configs/default.json declares. It MUST come from
@@ -98,7 +112,12 @@
         };
 
         # `nix flake check` runs the series gate: the patches must apply to the
-        # pristine upstream tarball and produce base.json's recorded tree.
+        # pristine upstream tarball and produce base.json's recorded tree --
+        # and the fastsnap round trip, which is the only check here that
+        # executes anything. It costs a single-target QEMU build.
+        checks.fastsnap-selftest = fastsnap-selftest;
+        checks.fastsnap-kvm-link = fastsnap-kvm-link;
+
         checks.series = pkgs.runCommand "series-applies" { } ''
           test -d ${src}
           test -f ${src}/system/penguin.c
@@ -108,11 +127,17 @@
           touch $out
         '';
 
+        # scripts/check-delta-present.sh needs nm and strings; the CI pods have
+        # no binutils, so it ran as exit 127 there and reported a tool being
+        # absent as the IGLOO delta being absent. build.yml runs it through
+        # this shell, so the tools come from the same pinned nixpkgs as
+        # everything else rather than from whatever the runner happens to have.
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             git
             python3
             jq
+            binutils
           ];
         };
       }

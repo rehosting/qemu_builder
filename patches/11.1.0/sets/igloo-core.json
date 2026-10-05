@@ -1,0 +1,14 @@
+{
+  "name": "igloo-core",
+  "summary": "Penguin's QEMU embedding: core callbacks, per-arch guest-hypercall routing, the snapshot and QMP ABIs, and the board fixes rehosting needs.",
+  "origin": {
+    "kind": "authored",
+    "project": "igloo"
+  },
+  "srcPaths": [
+    "src/system",
+    "src/include/system",
+    "src/scripts"
+  ],
+  "notes": "Written for Penguin. Each patch's License: trailer is determined entirely by the upstream QEMU files it edits -- there is no incoming licence, because there is no incoming code."
+}

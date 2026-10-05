@@ -126,6 +126,31 @@ jobs:
       # someone hand-edits a patch in a way export-series.sh would not emit,
       # this fails -- which is the only thing standing between us and a series
       # that slowly stops matching its own tooling.
+      # QEMU is NOT one licence, so neither is this series. The files it
+      # touches span MIT, LGPL-2.1-or-later, GPL-2.0-or-later and
+      # GPL-2.0-only, and a patch is a derivative of the files it edits rather
+      # than of the tree's aggregate -- so a repo-level "the patches are
+      # GPL-2.0" would be wrong about the MIT files, needlessly restrictive
+      # about the LGPL ones, and would hide the one patch that touches a
+      # GPL-2.0-ONLY file. Each patch declares its own, in trailers that travel
+      # inside the patch; this recomputes the answer and requires them to match.
+      #
+      # It also enforces patch SETS: every patch names the project whose
+      # contribution it belongs to, each set is described once in
+      # patches/<ver>/sets/<name>.json, and a set's patches must stay
+      # contiguous -- so an adopted project's contribution can be reviewed,
+      # dropped or rebased as a unit instead of being reassembled by hand.
+      - name: Per-patch licensing and patch sets
+        run: |
+          set -eux
+          . ./scripts/lib-extract.sh
+          rm -rf "$TMPDIR/pristine"
+          extract_tarball \
+            "upstream-tarball/qemu-${{ steps.base.outputs.tag }}.tar.xz" \
+            "$TMPDIR/pristine"
+          ./scripts/check-patch-licensing.py \
+            "${{ steps.base.outputs.version }}" "$TMPDIR/pristine"
+
       - name: Round-trip is byte-identical
         run: |
           set -eux

@@ -40,7 +40,16 @@ n=0
 for f in "$STAGE"/*.patch; do
     # skip the vendored-overlay commit
     if grep -qm1 '^Subject: .*VENDORED:' "$f"; then continue; fi
-    cp "$f" "$PATCHES/$VERSION/$(basename "$f")"
+    # NORMALISE THE AUTHOR LINE. These are patches against an upstream release
+    # tarball, not commits by a person, and the series identity is `igloo
+    # <nix@local>` by construction -- whoever's dev tree they were exported
+    # from is not information anyone wants here. Left alone, format-patch
+    # stamps each one with whatever git identity the dev tree happened to
+    # carry, which is how three patches landed in this series with a personal
+    # address that does not match the other fourteen. A committed, published
+    # artifact is the wrong place for that to be incidental.
+    sed '2s|^From: .*|From: igloo <nix@local>|' "$f" \
+        > "$PATCHES/$VERSION/$(basename "$f")"
     echo "$VERSION/$(basename "$f")" >> "$PATCHES/$VERSION/series"
     n=$((n + 1))
 done

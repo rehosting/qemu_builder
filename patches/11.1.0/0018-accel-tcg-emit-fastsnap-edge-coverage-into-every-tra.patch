@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: igloo <nix@local>
+Date: Wed, 16 Sep 2026 20:12:28 -0400
+Subject: [PATCH] accel/tcg: emit fastsnap edge coverage into every translated
+ block
+
+One call in translator_loop(), which is the only place a block-entry hook
+can live and still be correct.
+
+cpu_tb_exec() is the obvious alternative and it is wrong: chained blocks
+jump straight to each other and never return through it, so a counter
+there sees the first block of a chain and nothing else. Instrumenting at
+translation time puts the edge log inside the generated code, where the
+chain cannot route around it.
+
+It has to be a call rather than a conditional in the target frontends
+because the fourteen targets have fourteen frontends and this is the one
+generic point they all pass through. translator_loop() is compiled once
+per user/system flavour, so CONFIG_USER_ONLY is available and the hook is
+excluded from the linux-user build, where there is no fastsnap.
+
+WHY NOT A TCG PLUGIN. Plugins are built here -- configure enables them
+whenever a C++ compiler is present, so the shipped libqemu-system-armel.so
+exports 89 qemu_plugin_* symbols despite configs/default.json never naming
+--enable-plugins. They are still the wrong tool, for two reasons:
+
+  - A plugin cannot see the reset. The map has to be summarised and
+    cleared in the same bottom half that rewinds guest RAM. Penguin embeds
+    QEMU as a library and drives it over the CFFI ABI; a plugin is loaded
+    by QEMU and has no channel back to the embedding process.
+
+  - The plugin API cannot express an edge. Its inline ops are exactly
+    ADD_U64 and STORE_U64 against a fixed scoreboard entry, with no
+    indexed addressing, so map[prev ^ cur]++ has to become a per-block
+    callback -- an indirect call per translated block, against the eight
+    inline TCG ops this emits (before optimisation).
+
+Costs nothing when unused: fastsnap_cov_translate() returns on a single
+global bool before touching the TCG context, and nothing calls it in a
+build that never arms coverage.
+
+License: GPL-2.0-or-later
+Patch-Set: fastsnap
+---
+ accel/tcg/translator.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/accel/tcg/translator.c b/accel/tcg/translator.c
+index cd7d079fe050bcba229905bfd1de3df659264e81..6dad3db1c68f2dcd09623c874898b2ec7bb6509d 100644
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -16,6 +16,7 @@
+ #include "exec/target_page.h"
+ #include "exec/translator.h"
+ #include "exec/plugin-gen.h"
++#include "fastsnap/coverage.h"
+ #include "tcg/tcg-op-common.h"
+ #include "internal-common.h"
+ #include "disas/disas.h"
+@@ -153,6 +154,20 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
+     ops->tb_start(db, cpu);
+     tcg_debug_assert(db->is_jmp == DISAS_NEXT);  /* no early exit */
+ 
++#ifndef CONFIG_USER_ONLY
++    /*
++     * fastsnap edge coverage. Emitted once per block, ahead of the first
++     * instruction, so it runs however the block is entered -- including via a
++     * chained jump from another block, which never returns to cpu_tb_exec()
++     * and is why this cannot live there instead.
++     *
++     * A no-op unless coverage is armed, and it emits nothing at all for a
++     * block outside the configured address range, so a filtered block carries
++     * no runtime cost rather than a cheap one. See include/fastsnap/coverage.h.
++     */
++    fastsnap_cov_translate(db->pc_first);
++#endif
++
+     plugin_enabled = plugin_gen_tb_start(cpu, db);
+     db->plugin_enabled = plugin_enabled;
+ 

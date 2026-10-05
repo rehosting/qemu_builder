@@ -3,6 +3,7 @@
 # Generate CFFI-friendly declarations for Penguin's QEMU embedding ABI.
 
 import argparse
+import re
 import json
 import tarfile
 from pathlib import Path
@@ -135,7 +136,98 @@ void penguin_schedule_snapshot(const char *name, bool load);
 void set_penguin_reset_request_callback(penguin_reset_request_cb_t cb, void *opaque);
 void set_penguin_qmp_callback(penguin_qmp_cb_t cb, void *opaque);
 bool penguin_handle_qmp(const char *command, const char *args, char **result);
+
+/*
+ * fastsnap: device state in a block. Saves every non-iterative savevm section
+ * into one heap buffer and restores from it, with no migration stream and no
+ * qcow2 -- the device half of a fast in-process snapshot restore.
+ *
+ * device_save_kind()/device_restore_all() need the BQL held AND the vCPUs
+ * stopped: they walk live device state. From a Penguin pyplugin that means
+ * scheduling onto the main loop, the same constraint penguin_load_snapshot()
+ * has.
+ *
+ * device_list_all() returns a NULL-terminated array whose strings point into
+ * QEMU's own handler list -- do not free the strings, and do not hold them
+ * across a device hot-unplug.
+ */
+typedef struct DeviceSaveState {{
+    uint8_t kind;
+    uint8_t *save_buffer;
+    size_t save_buffer_size;
+}} DeviceSaveState;
+
+typedef enum DeviceSnapshotKind {{
+    DEVICE_SNAPSHOT_ALL,
+    DEVICE_SNAPSHOT_ALLOWLIST,
+    DEVICE_SNAPSHOT_DENYLIST
+}} DeviceSnapshotKind;
+
+DeviceSaveState *device_save_all(void);
+DeviceSaveState *device_save_kind(DeviceSnapshotKind kind, char **names);
+void device_restore_all(DeviceSaveState *dss);
+void device_free_all(DeviceSaveState *dss);
+char **device_list_all(void);
+bool fastsnap_devices_is_restoring(void);
+
+/*
+ * The scheduled form, and the one Penguin should actually use. The calls above
+ * need the BQL held AND the vCPUs stopped; a pyplugin callback runs on a vCPU
+ * thread inside a hypercall and has neither, so this defers the work to the
+ * main loop the way penguin_schedule_snapshot() does.
+ *
+ * It deliberately does NOT go through vm_stop(RUN_STATE_RESTORE_VM), which is
+ * what penguin_load_snapshot() uses and what makes accel/tcg flush every
+ * translation block. A device-only restore changes no RAM, so no translated
+ * block can go stale and the flush is unnecessary rather than merely costly.
+ *
+ * Fire-and-forget. Poll penguin_fastsnap_seq() for completion, then read
+ * penguin_fastsnap_last_rc() and the accessors. The op numbers and the
+ * prototypes below are EXTRACTED from include/fastsnap/penguin-fastsnap.h at
+ * generation time rather than restated here -- a hand-kept copy of an ABI
+ * drifts, and this one did: six ops and eleven accessors were added to the
+ * header and not to this file, so cffi never declared them, _lib_symbol()
+ * returned None, and the Python bindings quietly handed back 0 and -1 for a
+ * whole run. Nothing raised. Duration is measured in C because the
+ * operations are hundreds of microseconds and a pyplugin round trip is
+ * comparable to them.
+ */
+{fastsnap_decls}
 """
+
+
+def fastsnap_decls():
+    """Every penguin_fastsnap_* prototype, read out of the real header.
+
+    NOT a copy. The previous version of this file restated the prototypes, the
+    header grew six ops and eleven accessors, and this file did not: cffi never
+    saw the new names, ffi.cdef had no declaration for them, _lib_symbol()
+    returned None, and the Python bindings returned their "symbol absent"
+    fallbacks -- 0 for a byte count, -1 for a page count -- for an entire run.
+    Every one of those is a value the caller could plausibly have received from
+    a working build, so nothing raised and nothing looked wrong until a
+    256 MB RAM snapshot reported itself as 0 bytes.
+
+    An empty extraction is a hard error for the same reason. A generated header
+    with no fastsnap declarations in it produces exactly the failure above,
+    silently, and the only honest response to "I could not find the ABI" is to
+    stop.
+    """
+    header = Path(__file__).resolve().parent.parent / "include" / "fastsnap" \
+        / "penguin-fastsnap.h"
+    if not header.exists():
+        raise SystemExit(f"penguin-cffi-gen: cannot find {header}; refusing to "
+                         f"emit a header with no fastsnap ABI in it")
+    pat = re.compile(
+        r"^((?:void|int|int64_t|uint64_t|bool|const char \*)\s*"
+        r"penguin_fastsnap_\w+\([^;]*\);)$", re.M)
+    decls = pat.findall(header.read_text())
+    if not decls:
+        raise SystemExit(f"penguin-cffi-gen: found no penguin_fastsnap_* "
+                         f"prototypes in {header}; the extraction is broken, "
+                         f"and emitting the header anyway would hand cffi a "
+                         f"silently incomplete ABI")
+    return "\n".join(decls)
 
 
 def split_csv(value):
@@ -181,7 +273,8 @@ def kvm_entries(targets):
 def write_header(build_dir, entry):
     vaddr_type = "uint32_t" if entry["vaddr_bits"] == 32 else "uint64_t"
     path = build_dir / entry["header"]
-    path.write_text(HEADER_TEMPLATE.format(vaddr_type=vaddr_type))
+    path.write_text(HEADER_TEMPLATE.format(vaddr_type=vaddr_type,
+                                           fastsnap_decls=fastsnap_decls()))
     return path
 
 

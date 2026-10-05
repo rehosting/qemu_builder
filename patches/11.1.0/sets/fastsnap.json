@@ -1,0 +1,18 @@
+{
+  "name": "fastsnap",
+  "summary": "A second, faster reset path beside savevm/loadvm, for fuzzing. Device state goes into one heap buffer (adopted); RAM is restored per dirty page through QEMU's own migration bitmap (ours); a forked child read back with process_vm_readv is the correctness oracle (ours). Measured at 348-560 us per reset, verified byte-identical to the oracle across 281-403 MB of guest RAM.",
+  "origin": {
+    "kind": "adopted",
+    "project": "qemu-libafl-bridge",
+    "url": "https://github.com/AFLplusplus/qemu-libafl-bridge",
+    "commit": "4df4d2dcfa0d2eecfb267cddf5ebfb8ef9f58d87",
+    "upstreamQemuBase": "9.1.1",
+    "license": "GPL-2.0-or-later",
+    "provenance": "src/fastsnap/PROVENANCE.md"
+  },
+  "srcPaths": [
+    "src/fastsnap",
+    "src/include/fastsnap"
+  ],
+  "notes": "The adopted code is whole files under srcPaths, never interleaved into patch hunks, and it is the DEVICE half only. The RAM half is ours and deliberately uses QEMU's DIRTY_MEMORY_MIGRATION bitmap rather than the upstream project's own write hooks, which self-disarm on a warm guest: TCG traps a store only while TLB_NOTDIRTY is set, notdirty_write() clears it on the first write, and nothing there re-arms it -- so its dirty list comes back plausibly small and the restore is silently incomplete. Measured: 0/64 pages trapped after a mid-run snapshot point, 64/64 once tracking is re-armed.\n\nNeither half is sound alone. Restoring devices without RAM rewinds the CPU's page-table base into RAM that was never rewound; on real firmware that destroys the guest within a handful of restores (kernel panic in rcu_process_callbacks, swap_dup errors, OOM kills) while an identical cadence with the restore removed stays clean.\n\nThe series patches are ours. 0014 adds accessors to migration/savevm.c so the adopted code never sees SaveStateEntry's layout -- deliberately NOT the struct hoist the upstream project uses. 0015-0017 are a bug fix and two save-side costs found by profiling the round trip."
+}
