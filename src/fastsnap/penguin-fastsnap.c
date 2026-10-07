@@ -464,8 +464,19 @@ static int fastsnap_do(FastsnapOp op)
             return -1;
         }
         t0 = g_get_monotonic_time();
-        device_restore_all(fastsnap_slot);
+        /*
+         * RAM first, devices second. The dependency only runs one way: a RAM
+         * restore reads no device state, but a device's load can read guest
+         * RAM -- virtio_load() takes used_idx from the vring in guest memory
+         * and checks it against the saved last_avail_idx. Restored the other
+         * way round it reads a post-lap ring against an arm-time device and
+         * rejects the section ("VQ 0 size 0x100 < last_avail_idx 0x307 -
+         * used_idx 0x313": used_idx AHEAD of last_avail_idx, which no
+         * consistent snapshot can produce). That rejection is what kept every
+         * virtio section out of the block; it was the order, not the device.
+         */
         n = fastsnap_ram_restore();
+        device_restore_all(fastsnap_slot);
         fastsnap_last_us = g_get_monotonic_time() - t0;
         /*
          * The lap's coverage, summarised and cleared here rather than by an op
@@ -488,8 +499,9 @@ static int fastsnap_do(FastsnapOp op)
             return -1;
         }
         t0 = g_get_monotonic_time();
-        device_restore_all(fastsnap_slot);
+        /* RAM before devices, for the reason given at LOOP_RESET. */
         n = fastsnap_ram_restore();
+        device_restore_all(fastsnap_slot);
         t1 = g_get_monotonic_time();
         fastsnap_last_us = t1 - t0;
         if (n < 0) {
