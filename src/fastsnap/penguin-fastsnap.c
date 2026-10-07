@@ -63,22 +63,31 @@ static DeviceSaveState *fastsnap_slot;
 /*
  * Sections to leave OUT of the block, NULL-terminated, owned here.
  *
- * This is not a tuning knob, it is a correctness requirement, and only a real
- * firmware target shows why. A virtio device's state is split in two: the
- * device model holds last_avail_idx/used_idx, and the vring itself lives in
- * GUEST RAM. A device-only restore puts back the first half and leaves the
- * second at whatever the guest has since made of it, and virtio_load() is
- * strict enough to notice:
+ * What this is NOT, any more, is the reason virtio was excluded. A virtio
+ * device's state is split in two: the device model holds last_avail_idx, and
+ * the vring -- used_idx included -- lives in GUEST RAM. virtio_load() reads
+ * used_idx from that RAM and checks it against the saved last_avail_idx. With
+ * the loop reset restoring devices BEFORE RAM, it read a post-lap ring against
+ * an arm-time device and rejected the section:
  *
  *     VQ 1 size 0x100 < last_avail_idx 0x9 - used_idx 0x11
  *     error while loading state for instance 0x0 of device
  *     '0000:00:01.0/virtio-net': Failed to load element of type virtio
  *
  * Measured on a booted firmware image; a synthetic -M virt machine with no
- * virtio-net never reaches it. Any device whose state is co-located with guest
- * RAM has the same problem, so the fix is not to make virtio tolerant -- it is
- * to keep those devices out of a block that does not carry the RAM they refer
- * to. That is the announced trade: the fast path gives up the network backend.
+ * virtio-net never reaches it. For a while that was read as "a device whose
+ * state is co-located with guest RAM cannot be in the block", and every virtio
+ * section was denied on the strength of it. It was the restore order. The loop
+ * reset now restores RAM first (see the LOOP_RESET comment), and with only
+ * virtio-9p denied the loop verifies 120/120 on both oracles on the same
+ * firmware image, twice.
+ *
+ * What the denylist still is: the scope knob, and the one correctness tool for
+ * a section the block genuinely cannot carry -- state that lives in a host-side
+ * backend (a slirp connection, an AIO request in flight at arm time) is not in
+ * the guest, and nothing here drains or rewinds it. A denied section that moves
+ * is reported by the per-section device reference below, so the cost of
+ * denying is visible rather than silent.
  */
 static char **fastsnap_denylist;
 
