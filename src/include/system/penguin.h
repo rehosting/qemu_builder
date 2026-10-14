@@ -110,4 +110,30 @@ void set_penguin_qmp_callback(penguin_qmp_cb_t cb, void *opaque);
  */
 bool penguin_handle_qmp(const char *command, const char *args, char **result);
 
+/*
+ * Emit an arbitrary QMP event to every connected QMP monitor. This is the
+ * outbound counterpart to the QMP command callback above: the callback lets a
+ * plugin answer commands, this lets a plugin push an unsolicited notification.
+ *
+ * @name becomes the QMP "event" member verbatim, so a plugin can emit any event
+ * name without a QAPI schema entry. Because there is no schema entry there is
+ * no QAPIEvent ordinal, so these events bypass the rate limiting in
+ * monitor_qapi_event_conf[] and are never throttled or coalesced.
+ *
+ * @data_json is an optional JSON-encoded payload, or NULL/"" for none. It must
+ * decode to a JSON *object*: the QMP spec defines the "data" member as a
+ * json-object, so a scalar or array is rejected. The timestamp is added
+ * automatically, as for any QMP event.
+ *
+ * Safe to call from any thread, including a vCPU thread inside a guest
+ * hypercall handler: the work is deferred to a main-loop bottom half, so the
+ * caller does not need the BQL and does not block on JSON parsing or the
+ * monitor write. Fire-and-forget; an empty @name or a malformed or non-object
+ * @data_json is reported to QEMU stderr and the event is dropped.
+ *
+ * Note that an arbitrary @name can collide with a built-in QEMU event (e.g.
+ * "STOP"); choosing a distinctive name is the caller's responsibility.
+ */
+void penguin_qmp_emit_event(const char *name, const char *data_json);
+
 #endif /* QEMU_SYSTEM_PENGUIN_H */

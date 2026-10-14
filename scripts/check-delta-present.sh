@@ -33,6 +33,7 @@ CORE_SYMS=(
     penguin_cpu_env
     penguin_handle_qmp
     penguin_invoke_reset_request_callback
+    penguin_qmp_emit_event
 )
 TCG_SYM=helper_penguin_guest_hypercall   # every target EXCEPT x86
 IOPORT_STR=penguin-hypercall             # x86 only: the port-0x88 MemoryRegion name
