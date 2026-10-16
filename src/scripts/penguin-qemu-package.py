@@ -144,6 +144,13 @@ def main():
                         archive.add(module_path, arcname=module_arcname)
                         entries.append(module_arcname)
 
+        plugin_dir = system_build_dir / "qemu-plugins"
+        if plugin_dir.is_dir():
+            for plugin in sorted(plugin_dir.glob("*.so")):
+                arcname = f"lib/qemu-plugins/{plugin.name}"
+                archive.add(plugin, arcname=arcname)
+                entries.append(arcname)
+
         metadata = {
             "schema": 1,
             "entries": sorted(entries),

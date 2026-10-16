@@ -148,4 +148,15 @@ if [ -n "$kvm_targets" ]; then
         --manifest build-kvm/qemu_cffi_kvm_manifest.json
 fi
 
+# TCG plugins penguin loads by path (lib/qemu-plugins/). Built directly against
+# the plugin API header, as an out-of-tree plugin would be: they are vendored
+# files under contrib/plugins/, not part of QEMU's own contrib meson list.
+mkdir -p build-system/qemu-plugins
+for plugin in kmodinject; do
+    ${CC:-cc} -O2 -Wall -shared -fPIC -Iinclude/plugins \
+        $(pkg-config --cflags glib-2.0) \
+        -o "build-system/qemu-plugins/lib${plugin}.so" \
+        "contrib/plugins/${plugin}.c" $(pkg-config --libs glib-2.0)
+done
+
 python3 scripts/penguin-qemu-package.py --output penguin-qemu.tar.gz
