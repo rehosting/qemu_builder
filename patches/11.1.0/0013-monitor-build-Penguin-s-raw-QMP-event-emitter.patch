@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Wed, 14 Oct 2026 18:35:05 -0400
+Subject: [PATCH] monitor: build Penguin's raw QMP event emitter
+
+penguin_qmp_emit_event() (system/penguin.h) pushes an unsolicited QMP event
+of any name to every connected QMP monitor: the outbound counterpart to the
+QMP command callback. It walks mon_list the way monitor_qapi_event_emit()
+does, so it needs monitor-internal.h and lives in monitor/penguin-event.c
+(vendored) rather than beside the other hooks in system/penguin.c. This is
+the only upstream file it touches: add it to the qmp source set.
+
+Ported from rehosting/qemu 862d4fb74f (#22).
+
+Co-authored-by: Benjamin Levy <153011444+be32826@users.noreply.github.com>
+---
+ monitor/meson.build | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/monitor/meson.build b/monitor/meson.build
+index 4c58dd148c0496156b93feeb66cee2cfb27e07fd..b058dbca7040a68775d1d6ac9312b5d94307b12f 100644
+--- a/monitor/meson.build
++++ b/monitor/meson.build
+@@ -1,4 +1,5 @@
+-qmp_ss.add(files('monitor.c', 'qmp.c', 'qmp-cmds-control.c'))
++qmp_ss.add(files('monitor.c', 'penguin-event.c', 'qmp.c',
++                 'qmp-cmds-control.c'))
+ 
+ system_ss.add(files(
+   'fds.c',

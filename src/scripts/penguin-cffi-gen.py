@@ -135,6 +135,7 @@ void penguin_schedule_snapshot(const char *name, bool load);
 void set_penguin_reset_request_callback(penguin_reset_request_cb_t cb, void *opaque);
 void set_penguin_qmp_callback(penguin_qmp_cb_t cb, void *opaque);
 bool penguin_handle_qmp(const char *command, const char *args, char **result);
+void penguin_qmp_emit_event(const char *name, const char *data_json);
 """
 
 

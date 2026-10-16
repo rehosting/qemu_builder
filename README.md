@@ -210,7 +210,7 @@ so — run `probe-versions.sh` locally against a full clone for the real split.
 
 **Proven here:**
 
-- The series applies **12/12 to the pristine v11.1.0 tarball with strict context**
+- The series applies **13/13 to the pristine v11.1.0 tarball with strict context**
   (`git am`, no `--3way`) and reproduces the recorded tree.
 - The gate catches corruption that still applies: corrupting one line of `0012`
   still passes 12/12 on step 2 and fails on step 3.
