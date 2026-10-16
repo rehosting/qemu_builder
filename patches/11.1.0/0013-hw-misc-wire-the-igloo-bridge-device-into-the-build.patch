@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Wed, 14 Oct 2026 16:11:04 -0400
+Subject: [PATCH] hw/misc: wire the igloo bridge device into the build
+
+Adds CONFIG_IGLOO_BRIDGE (default y) and compiles
+src/hw/misc/igloo_bridge.c, the host end of a TCP stream bridge that an
+in-guest igloo kernel module drives over one Penguin hypercall. It stands
+in for vsock on guest kernels that cannot have AF_VSOCK (before 3.9, or
+with no virtio transport): "-device igloo-bridge,fwd=...,ctl=..." exposes
+host port forwards into the guest and a unix control socket with the
+vhost-user-vsock style "CONNECT <port>" handshake.
+
+The wire protocol is src/include/hw/misc/igloo_bridge_proto.h, shared
+verbatim with the guest module. The device takes Penguin's single guest
+hypercall callback, so it is for runs without Penguin attached; under
+Penguin the same protocol is served by a plugin.
+---
+ hw/misc/Kconfig     | 4 ++++
+ hw/misc/meson.build | 2 ++
+ 2 files changed, 6 insertions(+)
+
+diff --git a/hw/misc/Kconfig b/hw/misc/Kconfig
+index 1543ee66531bfcbba8293c8580798cb08c9cbd09..f2bc5dbe8c5f4891d331107bdfd79dffed82c6bf 100644
+--- a/hw/misc/Kconfig
++++ b/hw/misc/Kconfig
+@@ -258,3 +258,7 @@ config XLNX_ZYNQ_DDRC
+     bool
+ 
+ source macio/Kconfig
++
++config IGLOO_BRIDGE
++    bool
++    default y
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index 23265f6035bd566f4f301d8b5f59349255ff3e06..b757e718056da95b3b6b42688dccf27334915624 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -168,3 +168,5 @@ system_ss.add(when: 'CONFIG_SBSA_REF', if_true: files('sbsa_ec.c'))
+ 
+ # HPPA devices
+ system_ss.add(when: 'CONFIG_LASI', if_true: files('lasi.c'))
++
++system_ss.add(when: 'CONFIG_IGLOO_BRIDGE', if_true: files('igloo_bridge.c'))
