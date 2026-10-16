@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Wed, 14 Oct 2026 16:09:19 -0400
+Subject: [PATCH] hw/misc/arm_l2x0: make the AUX_CTRL reset value a property
+
+The PL310 model resets AUX_CTRL to 0x02020000. On real boards the boot
+firmware has already programmed it, and kernels read associativity and way
+size from it rather than writing their own. Add an "aux-ctrl" property for
+the reset value, defaulting to the current constant.
+---
+ hw/misc/arm_l2x0.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/hw/misc/arm_l2x0.c b/hw/misc/arm_l2x0.c
+index 039f1b0f2ce137cd9b41b5039835d7431c44ee69..f316dfda34dfc576e4a7ca21ddd3d3788a3f387f 100644
+--- a/hw/misc/arm_l2x0.c
++++ b/hw/misc/arm_l2x0.c
+@@ -39,6 +39,7 @@ struct L2x0State {
+     uint32_t cache_type;
+     uint32_t ctrl;
+     uint32_t aux_ctrl;
++    uint32_t aux_ctrl_reset;
+     uint32_t data_ctrl;
+     uint32_t tag_ctrl;
+     uint32_t filter_start;
+@@ -150,7 +151,7 @@ static void l2x0_priv_reset(DeviceState *dev)
+     L2x0State *s = ARM_L2X0(dev);
+ 
+     s->ctrl = 0;
+-    s->aux_ctrl = 0x02020000;
++    s->aux_ctrl = s->aux_ctrl_reset;
+     s->tag_ctrl = 0;
+     s->data_ctrl = 0;
+     s->filter_start = 0;
+@@ -175,6 +176,8 @@ static void l2x0_priv_init(Object *obj)
+ 
+ static const Property l2x0_properties[] = {
+     DEFINE_PROP_UINT32("cache-type", L2x0State, cache_type, 0x1c100100),
++    /* AUX_CTRL as firmware left it; associativity and way size live here */
++    DEFINE_PROP_UINT32("aux-ctrl", L2x0State, aux_ctrl_reset, 0x02020000),
+ };
+ 
+ static void l2x0_class_init(ObjectClass *klass, const void *data)

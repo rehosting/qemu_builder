@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Wed, 14 Oct 2026 16:10:33 -0400
+Subject: [PATCH] hw/arm: wire the BCM47094 (Northstar) router board into the
+ build
+
+Adds CONFIG_BCM4709 (default y, TCG+ARM) and compiles the board and its
+devices: src/hw/arm/bcm4709.c (machine "bcm47094-router"),
+src/hw/misc/bcm_ns.c (ChipCommon, IDM wrappers, EROM, DMU/CRU),
+src/hw/block/bcm_ns_nand.c (NAND controller), src/hw/net/bcm_ns_eth.c
+(GMAC + BCM53012 switch) and src/hw/net/rtl8365mb.c (external switch on
+bit-banged SMI). Like the penguin.c wiring in patch 0001, those files are
+vendored authored sources; this patch only references them from the
+upstream Kconfig and meson.build files.
+
+The board runs an unmodified 2.6.36 vendor kernel and its stock userspace
+from a NAND image. It depends on the a9mpcore periphclk-frequency,
+arm_l2x0 aux-ctrl and serial tx-pacing properties added earlier in the
+series.
+---
+ hw/arm/Kconfig       | 9 +++++++++
+ hw/arm/meson.build   | 1 +
+ hw/block/meson.build | 2 ++
+ hw/misc/meson.build  | 2 ++
+ hw/net/meson.build   | 1 +
+ 5 files changed, 15 insertions(+)
+
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index 82e0bc2e7004384f98c407122c285fa43ab410f4..77e1cd45a1f2c7feb7886ee9458821fda7e22672 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -243,6 +243,15 @@ config SX1
+     depends on TCG && ARM
+     select OMAP
+ 
++config BCM4709
++    bool
++    default y
++    depends on TCG && ARM
++    select A9MPCORE
++    select PL310
++    select SERIAL_MM
++    select UNIMP
++
+ config VERSATILE
+     bool
+     default y
+diff --git a/hw/arm/meson.build b/hw/arm/meson.build
+index 4233a800be2b060cbed97c5a4ad4ac775a5afbb3..5621007af496bd7da5f062bcf1423241ccfa628a 100644
+--- a/hw/arm/meson.build
++++ b/hw/arm/meson.build
+@@ -108,6 +108,7 @@ arm_common_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2838_peripherals.c'))
+ arm_common_ss.add(when: 'CONFIG_STRONGARM', if_true: files('strongarm.c'))
+ arm_common_ss.add(when: 'CONFIG_SX1', if_true: files('omap_sx1.c'))
+ arm_common_ss.add(when: 'CONFIG_VERSATILE', if_true: files('versatilepb.c'))
++arm_common_ss.add(when: 'CONFIG_BCM4709', if_true: files('bcm4709.c'))
+ arm_common_ss.add(when: 'CONFIG_VEXPRESS', if_true: files('vexpress.c'))
+ 
+ arm_common_ss.add(files('boot.c'))
+diff --git a/hw/block/meson.build b/hw/block/meson.build
+index d646323b82b8427ff760b0df733822984c62acff..ae0e5550de1d661c73a4bb8a71f11de1b15e2f74 100644
+--- a/hw/block/meson.build
++++ b/hw/block/meson.build
+@@ -19,3 +19,5 @@ system_ss.add(when: 'CONFIG_VHOST_USER_BLK', if_true: files('vhost-user-blk.c'))
+ system_ss.add(when: 'CONFIG_VHOST_USER_BLK', if_true: files('virtio-blk-common.c'))
+ 
+ subdir('dataplane')
++
++system_ss.add(when: 'CONFIG_BCM4709', if_true: files('bcm_ns_nand.c'))
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index 23265f6035bd566f4f301d8b5f59349255ff3e06..c171fb5dd4c200b88f83a31a4388e4d596c2c877 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -168,3 +168,5 @@ system_ss.add(when: 'CONFIG_SBSA_REF', if_true: files('sbsa_ec.c'))
+ 
+ # HPPA devices
+ system_ss.add(when: 'CONFIG_LASI', if_true: files('lasi.c'))
++
++system_ss.add(when: 'CONFIG_BCM4709', if_true: files('bcm_ns.c'))
+diff --git a/hw/net/meson.build b/hw/net/meson.build
+index 84f142df222afd6ac16c1e86ccdb05a222a4b65c..792bdad2efec3a625b2ff0461f6a4280ed812bf3 100644
+--- a/hw/net/meson.build
++++ b/hw/net/meson.build
+@@ -70,3 +70,4 @@ stub_ss.add(files('rocker/rocker-stubs.c'))
+ system_ss.add(files('rocker/rocker-hmp-cmds.c'))
+ 
+ subdir('can')
++system_ss.add(when: 'CONFIG_BCM4709', if_true: files('bcm_ns_eth.c', 'rtl8365mb.c'))

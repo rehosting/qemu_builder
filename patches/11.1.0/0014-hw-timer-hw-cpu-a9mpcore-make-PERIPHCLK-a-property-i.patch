@@ -1,0 +1,233 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Wed, 14 Oct 2026 16:09:19 -0400
+Subject: [PATCH] hw/timer, hw/cpu/a9mpcore: make PERIPHCLK a property instead
+ of a fixed 100 MHz
+
+The Cortex-A9 global timer and the private timers/watchdog hard-code a
+10 ns tick (PERIPHCLK = 100 MHz). Real SoCs run PERIPHCLK at half the CPU
+clock, and kernels that calibrate against a board-specific rate (rather
+than measuring it) then see time pass at the wrong speed.
+
+Add a "clock-frequency" property to a9gtimer and arm_mptimer, default
+100000000 so existing boards are unchanged, and a "periphclk-frequency"
+property on a9mpcore_priv that sets it on all three. The global timer
+converts with muldiv64 and rounds the compare deadline up so it never
+fires early; the private timers program their ptimer from a Clock.
+---
+ hw/cpu/a9mpcore.c              |  4 ++++
+ hw/timer/a9gtimer.c            | 22 ++++++++++++++++++----
+ hw/timer/arm_mptimer.c         | 19 ++++++++++++++-----
+ include/hw/cpu/a9mpcore.h      |  1 +
+ include/hw/timer/a9gtimer.h    |  1 +
+ include/hw/timer/arm_mptimer.h |  4 ++++
+ 6 files changed, 42 insertions(+), 9 deletions(-)
+
+diff --git a/hw/cpu/a9mpcore.c b/hw/cpu/a9mpcore.c
+index 2127f9557892f766071331a580917cd96327727d..4c2dc20c0e36c107945c48444aab29af4b879df1 100644
+--- a/hw/cpu/a9mpcore.c
++++ b/hw/cpu/a9mpcore.c
+@@ -103,6 +103,7 @@ static void a9mp_priv_realize(DeviceState *dev, Error **errp)
+ 
+     gtimerdev = DEVICE(&s->gtimer);
+     qdev_prop_set_uint32(gtimerdev, "num-cpu", s->num_cpu);
++    qdev_prop_set_uint32(gtimerdev, "clock-frequency", s->periphclk_hz);
+     if (!sysbus_realize(SYS_BUS_DEVICE(&s->gtimer), errp)) {
+         return;
+     }
+@@ -110,6 +111,7 @@ static void a9mp_priv_realize(DeviceState *dev, Error **errp)
+ 
+     mptimerdev = DEVICE(&s->mptimer);
+     qdev_prop_set_uint32(mptimerdev, "num-cpu", s->num_cpu);
++    qdev_prop_set_uint32(mptimerdev, "clock-frequency", s->periphclk_hz);
+     if (!sysbus_realize(SYS_BUS_DEVICE(&s->mptimer), errp)) {
+         return;
+     }
+@@ -117,6 +119,7 @@ static void a9mp_priv_realize(DeviceState *dev, Error **errp)
+ 
+     wdtdev = DEVICE(&s->wdt);
+     qdev_prop_set_uint32(wdtdev, "num-cpu", s->num_cpu);
++    qdev_prop_set_uint32(wdtdev, "clock-frequency", s->periphclk_hz);
+     if (!sysbus_realize(SYS_BUS_DEVICE(&s->wdt), errp)) {
+         return;
+     }
+@@ -165,6 +168,7 @@ static void a9mp_priv_realize(DeviceState *dev, Error **errp)
+ 
+ static const Property a9mp_priv_properties[] = {
+     DEFINE_PROP_UINT32("num-cpu", A9MPPrivState, num_cpu, 1),
++    DEFINE_PROP_UINT32("periphclk-frequency", A9MPPrivState, periphclk_hz, 100000000),
+     /*
+      * The Cortex-A9MP may have anything from 0 to 224 external interrupt
+      * lines, plus always 32 internal IRQs. This property sets the total
+diff --git a/hw/timer/a9gtimer.c b/hw/timer/a9gtimer.c
+index 3a086915c817abcf47f453ad14294217f15371c8..26a2b61e7ff46e1d22f1e56e49bd565ed32ba3b3 100644
+--- a/hw/timer/a9gtimer.c
++++ b/hw/timer/a9gtimer.c
+@@ -60,12 +60,24 @@ static inline int a9_gtimer_get_current_cpu(A9GTimerState *s)
+     return current_cpu->cpu_index;
+ }
+ 
+-static inline uint64_t a9_gtimer_get_conv(A9GTimerState *s)
++/* Nanoseconds per (prescale + 1) timer ticks, scaled by the input clock. */
++static inline uint64_t a9_gtimer_ns_per_tick_den(A9GTimerState *s)
+ {
+     uint64_t prescale = extract32(s->control, R_CONTROL_PRESCALER_SHIFT,
+                                   R_CONTROL_PRESCALER_LEN);
+ 
+-    return (prescale + 1) * 10;
++    return (prescale + 1) * NANOSECONDS_PER_SECOND;
++}
++
++static inline uint64_t a9_gtimer_ns_to_ticks(A9GTimerState *s, uint64_t ns)
++{
++    return muldiv64(ns, s->freq_hz, a9_gtimer_ns_per_tick_den(s));
++}
++
++static inline uint64_t a9_gtimer_ticks_to_ns(A9GTimerState *s, uint64_t ticks)
++{
++    /* Round up so the compare event is never scheduled early. */
++    return muldiv64(ticks, a9_gtimer_ns_per_tick_den(s), s->freq_hz) + 1;
+ }
+ 
+ static A9GTimerUpdate a9_gtimer_get_update(A9GTimerState *s)
+@@ -74,7 +86,7 @@ static A9GTimerUpdate a9_gtimer_get_update(A9GTimerState *s)
+ 
+     ret.now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+     ret.new = s->ref_counter +
+-              (ret.now - s->cpu_ref_time) / a9_gtimer_get_conv(s);
++              a9_gtimer_ns_to_ticks(s, ret.now - s->cpu_ref_time);
+     return ret;
+ }
+ 
+@@ -117,7 +129,7 @@ static void a9_gtimer_update(A9GTimerState *s, bool sync)
+     if (next_cdiff) {
+         DB_PRINT("scheduling qemu_timer to fire again in %"
+                  PRIx64 " cycles\n", next_cdiff);
+-        timer_mod(s->timer, update.now + next_cdiff * a9_gtimer_get_conv(s));
++        timer_mod(s->timer, update.now + a9_gtimer_ticks_to_ns(s, next_cdiff));
+     }
+ 
+     if (s->control & R_CONTROL_TIMER_ENABLE) {
+@@ -375,6 +387,8 @@ static const VMStateDescription vmstate_a9_gtimer = {
+ 
+ static const Property a9_gtimer_properties[] = {
+     DEFINE_PROP_UINT32("num-cpu", A9GTimerState, num_cpu, 0),
++    /* PERIPHCLK; the historical model ran at a fixed 100 MHz */
++    DEFINE_PROP_UINT32("clock-frequency", A9GTimerState, freq_hz, 100000000),
+ };
+ 
+ static void a9_gtimer_class_init(ObjectClass *klass, const void *data)
+diff --git a/hw/timer/arm_mptimer.c b/hw/timer/arm_mptimer.c
+index 88158144b23f47a463840cde46e014bbe5952a55..b924c3015f4b5c4e3afe6f3cb3cd3f54a00d9b09 100644
+--- a/hw/timer/arm_mptimer.c
++++ b/hw/timer/arm_mptimer.c
+@@ -58,10 +58,10 @@ static inline void timerblock_update_irq(TimerBlock *tb)
+     qemu_set_irq(tb->irq, tb->status && (tb->control & 4));
+ }
+ 
+-/* Return conversion factor from mpcore timer ticks to qemu timer ticks.  */
+-static inline uint32_t timerblock_scale(uint32_t control)
++/* Program the ptimer rate: PERIPHCLK / (prescaler + 1). */
++static inline void timerblock_set_rate(TimerBlock *tb, uint32_t control)
+ {
+-    return (((control >> 8) & 0xff) + 1) * 10;
++    ptimer_set_period_from_clock(tb->timer, tb->clk, ((control >> 8) & 0xff) + 1);
+ }
+ 
+ /* Must be called within a ptimer transaction block */
+@@ -155,7 +155,7 @@ static void timerblock_write(void *opaque, hwaddr addr,
+             ptimer_stop(tb->timer);
+         }
+         if ((control & 0xff00) != (value & 0xff00)) {
+-            ptimer_set_period(tb->timer, timerblock_scale(value));
++            timerblock_set_rate(tb, value);
+         }
+         if (value & 1) {
+             uint64_t count = ptimer_get_count(tb->timer);
+@@ -222,7 +222,7 @@ static void timerblock_reset(TimerBlock *tb)
+         ptimer_transaction_begin(tb->timer);
+         ptimer_stop(tb->timer);
+         ptimer_set_limit(tb->timer, 0, 1);
+-        ptimer_set_period(tb->timer, timerblock_scale(0));
++        timerblock_set_rate(tb, 0);
+         ptimer_transaction_commit(tb->timer);
+     }
+ }
+@@ -267,8 +267,15 @@ static void arm_mptimer_realize(DeviceState *dev, Error **errp)
+      *  * timer for core 1
+      * and so on.
+      */
++    if (s->freq_hz == 0) {
++        error_setg(errp, "clock-frequency must be non-zero");
++        return;
++    }
++    s->clk = clock_new(OBJECT(s), "periphclk");
++    clock_set_hz(s->clk, s->freq_hz);
+     for (i = 0; i < s->num_cpu; i++) {
+         TimerBlock *tb = &s->timerblock[i];
++        tb->clk = s->clk;
+         tb->timer = ptimer_init(timerblock_tick, tb, PTIMER_POLICY);
+         sysbus_init_irq(sbd, &tb->irq);
+         memory_region_init_io(&tb->iomem, OBJECT(s), &timerblock_ops, tb,
+@@ -302,6 +309,8 @@ static const VMStateDescription vmstate_arm_mptimer = {
+ 
+ static const Property arm_mptimer_properties[] = {
+     DEFINE_PROP_UINT32("num-cpu", ARMMPTimerState, num_cpu, 0),
++    /* PERIPHCLK; the historical model ran at a fixed 100 MHz */
++    DEFINE_PROP_UINT32("clock-frequency", ARMMPTimerState, freq_hz, 100000000),
+ };
+ 
+ static void arm_mptimer_class_init(ObjectClass *klass, const void *data)
+diff --git a/include/hw/cpu/a9mpcore.h b/include/hw/cpu/a9mpcore.h
+index 60765990247b80d9d24ef3062443d5c224c0c16d..8945ea113bd12d6f9f1fd016434e1285b9f83948 100644
+--- a/include/hw/cpu/a9mpcore.h
++++ b/include/hw/cpu/a9mpcore.h
+@@ -26,6 +26,7 @@ struct A9MPPrivState {
+     /*< public >*/
+ 
+     uint32_t num_cpu;
++    uint32_t periphclk_hz;
+     MemoryRegion container;
+     uint32_t num_irq;
+ 
+diff --git a/include/hw/timer/a9gtimer.h b/include/hw/timer/a9gtimer.h
+index 5c9b048b95455a97f76e9f392da33355fa577d16..2eb5c0a5f7b44dbef3311316727888d9a5028a07 100644
+--- a/include/hw/timer/a9gtimer.h
++++ b/include/hw/timer/a9gtimer.h
+@@ -77,6 +77,7 @@ struct A9GTimerState {
+     MemoryRegion iomem;
+     /* static props */
+     uint32_t num_cpu;
++    uint32_t freq_hz;
+ 
+     QEMUTimer *timer;
+ 
+diff --git a/include/hw/timer/arm_mptimer.h b/include/hw/timer/arm_mptimer.h
+index 4c6f5696319c0f522f302250824da2be687ed0fc..40cf393f5a7fc13b5e8376870051bf3be2272e55 100644
+--- a/include/hw/timer/arm_mptimer.h
++++ b/include/hw/timer/arm_mptimer.h
+@@ -22,6 +22,7 @@
+ #define HW_TIMER_ARM_MPTIMER_H
+ 
+ #include "hw/core/sysbus.h"
++#include "hw/core/clock.h"
+ #include "qom/object.h"
+ 
+ #define ARM_MPTIMER_MAX_CPUS 4
+@@ -33,6 +34,7 @@ typedef struct {
+     struct ptimer_state *timer;
+     qemu_irq irq;
+     MemoryRegion iomem;
++    Clock *clk;         /* PERIPHCLK, shared by all blocks */
+ } TimerBlock;
+ 
+ #define TYPE_ARM_MPTIMER "arm_mptimer"
+@@ -44,6 +46,8 @@ struct ARMMPTimerState {
+     /*< public >*/
+ 
+     uint32_t num_cpu;
++    uint32_t freq_hz;
++    Clock *clk;
+     TimerBlock timerblock[ARM_MPTIMER_MAX_CPUS];
+     MemoryRegion iomem;
+ };

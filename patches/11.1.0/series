@@ -10,3 +10,7 @@
 11.1.0/0010-penguin-snapshot-ABI-and-a-migratable-vhost-user-vso.patch
 11.1.0/0011-penguin-reset-request-and-QMP-command-callbacks.patch
 11.1.0/0012-hw-mips-malta-enlarge-the-prom-env-slot-so-the-cmdli.patch
+11.1.0/0013-hw-char-serial-add-a-tx-pacing-property.patch
+11.1.0/0014-hw-timer-hw-cpu-a9mpcore-make-PERIPHCLK-a-property-i.patch
+11.1.0/0015-hw-misc-arm_l2x0-make-the-AUX_CTRL-reset-value-a-pro.patch
+11.1.0/0016-hw-arm-wire-the-BCM47094-Northstar-router-board-into.patch

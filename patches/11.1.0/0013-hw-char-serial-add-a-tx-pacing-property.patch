@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Wed, 14 Oct 2026 16:09:06 -0400
+Subject: [PATCH] hw/char/serial: add a tx-pacing property
+
+With tx-pacing=on, a write to THR keeps the transmitter busy for one
+character time (char_transmit_time, from the programmed divisor) before the
+byte goes to the backend and THRE is raised, instead of completing at once.
+
+A guest 8250 driver that runs a FIFO-less 16550 services one byte per THRE
+interrupt. When THRE comes back instantly the ISR loops until it hits its
+PASS_LIMIT and logs "serial8250: too much work for irq N" over and over.
+Pacing at line rate is what the hardware does and keeps those drivers quiet.
+
+Off by default, so existing machines are unchanged. A pending paced byte is
+flushed in pre_save, so the saved state keeps the "tsr_retry == 0 implies
+TEMT" invariant that post_load checks; reset cancels it.
+---
+ hw/char/serial.c         | 34 +++++++++++++++++++++++++++++++++-
+ include/hw/char/serial.h |  5 +++++
+ 2 files changed, 38 insertions(+), 1 deletion(-)
+
+diff --git a/hw/char/serial.c b/hw/char/serial.c
+index 0729cd2ce9d7b122d13bd6b08b8b74962fb86a2e..1be87f9a8d9b7a1fa0dab361178b1ea36ce48c8c 100644
+--- a/hw/char/serial.c
++++ b/hw/char/serial.c
+@@ -234,6 +234,15 @@ static gboolean serial_watch_cb(void *do_not_use, GIOCondition cond,
+     return G_SOURCE_REMOVE;
+ }
+ 
++static void serial_tx_timer_cb(void *opaque)
++{
++    SerialState *s = opaque;
++
++    if (s->tsr_retry == 0 && !(s->lsr & UART_LSR_TEMT)) {
++        serial_xmit(s);
++    }
++}
++
+ static void serial_xmit(SerialState *s)
+ {
+     do {
+@@ -358,7 +367,12 @@ static void serial_ioport_write(void *opaque, hwaddr addr, uint64_t val,
+             s->lsr &= ~UART_LSR_TEMT;
+             serial_update_irq(s);
+             if (s->tsr_retry == 0) {
+-                serial_xmit(s);
++                if (!s->tx_timer) {
++                    serial_xmit(s);
++                } else if (!timer_pending(s->tx_timer)) {
++                    timer_mod(s->tx_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)
++                              + s->char_transmit_time);
++                }
+             }
+         }
+         break;
+@@ -635,6 +649,13 @@ static int serial_pre_save(void *opaque)
+     SerialState *s = opaque;
+     s->fcr_vmstate = s->fcr;
+ 
++    /* a paced byte in flight: send it now, so the saved state keeps the
++     * "tsr_retry == 0 implies TEMT" invariant post_load checks */
++    if (s->tx_timer && timer_pending(s->tx_timer)) {
++        timer_del(s->tx_timer);
++        serial_tx_timer_cb(s);
++    }
++
+     return 0;
+ }
+ 
+@@ -875,6 +896,9 @@ static void serial_reset(void *opaque)
+     s->timeout_ipending = 0;
+     timer_del(s->fifo_timeout_timer);
+     timer_del(s->modem_status_poll);
++    if (s->tx_timer) {
++        timer_del(s->tx_timer);
++    }
+ 
+     fifo8_reset(&s->recv_fifo);
+     fifo8_reset(&s->xmit_fifo);
+@@ -924,6 +948,9 @@ static void serial_realize(DeviceState *dev, Error **errp)
+     s->modem_status_poll = timer_new_ns(QEMU_CLOCK_VIRTUAL, (QEMUTimerCB *) serial_update_msl, s);
+ 
+     s->fifo_timeout_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, (QEMUTimerCB *) fifo_timeout_int, s);
++    if (s->tx_pacing) {
++        s->tx_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, serial_tx_timer_cb, s);
++    }
+     qemu_register_reset(serial_reset, s);
+ 
+     qemu_chr_fe_set_handlers(&s->chr, serial_can_receive1, serial_receive1,
+@@ -941,6 +968,10 @@ static void serial_unrealize(DeviceState *dev)
+     timer_free(s->modem_status_poll);
+ 
+     timer_free(s->fifo_timeout_timer);
++    if (s->tx_timer) {
++        timer_free(s->tx_timer);
++        s->tx_timer = NULL;
++    }
+ 
+     fifo8_destroy(&s->recv_fifo);
+     fifo8_destroy(&s->xmit_fifo);
+@@ -965,6 +996,7 @@ static const Property serial_properties[] = {
+     DEFINE_PROP_CHR("chardev", SerialState, chr),
+     DEFINE_PROP_UINT32("baudbase", SerialState, baudbase, 115200),
+     DEFINE_PROP_BOOL("wakeup", SerialState, wakeup, false),
++    DEFINE_PROP_BOOL("tx-pacing", SerialState, tx_pacing, false),
+ };
+ 
+ static void serial_class_init(ObjectClass *klass, const void *data)
+diff --git a/include/hw/char/serial.h b/include/hw/char/serial.h
+index ea82ffac47608c78e8e774ddc99357eb9184ff43..ef6c0fd9f8bb313efa549ccc4c99d70535b57249 100644
+--- a/include/hw/char/serial.h
++++ b/include/hw/char/serial.h
+@@ -77,6 +77,11 @@ struct SerialState {
+ 
+     QEMUTimer *modem_status_poll;
+     MemoryRegion io;
++
++    /* tx-pacing: the transmitter takes char_transmit_time per write, so
++     * THRE comes back at line rate instead of at once */
++    bool tx_pacing;
++    QEMUTimer *tx_timer;
+ };
+ 
+ extern const VMStateDescription vmstate_serial;
