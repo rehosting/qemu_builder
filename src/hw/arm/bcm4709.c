@@ -191,6 +191,10 @@ static const BCMNSRegInit ns_dmu_init[] = {
     { 0x15c, 0x00040810, 0 },            /* ctrl7: mdiv ch3/4/5 */
     { 0x160, 0x00001000, 0x00001000 },   /* status: locked */
     { 0x2a0, 0x00000010, 0 },            /* straps: bit4 = USB3 (not 3rd PCIe) */
+    /* PVTMON status, read-only. The kernel reports 418 - 0.5556 * value degC
+     * (/proc/dmu/temperature, shown in the web UI); 0 would read as 418 degC.
+     * 0x284 is about 60 degC, a plausible idle SoC. [assume] the value. */
+    { 0x2c8, 0x00000284, 0xffffffff },
     { UINT32_MAX, 0, 0 },
 };
 
