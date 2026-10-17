@@ -43,6 +43,10 @@
 #include "system/blockdev.h"
 #include "system/address-spaces.h"
 #include "system/reset.h"
+#include "system/runstate.h"
+#include "exec/cpu-common.h"
+#include "qemu/bswap.h"
+#include "bcm4709_lzma.h"
 #include "target/arm/cpu-qom.h"
 #include "target/arm/cpu.h"
 
@@ -215,7 +219,103 @@ static const BCMNSRegInit ns_ihost_init[] = {
 typedef struct {
     ARMCPU *cpu[2];
     MemoryRegion dram_lo, dram_acp[2], dram_hi_wrap, rom, erom;
+    DeviceState *nand;
 } NSBoard;
+
+/*
+ * CFE-style boot from flash, used when no -kernel is given: on every reset,
+ * read the TRX at the start of the "linux" partition from the NAND's current
+ * contents, check its header CRC as CFE does, LZMA-decompress partition 0 (the
+ * kernel) and place it at 0x8000. A firmware upgrade written by the guest is
+ * therefore what the next reset boots. CFE's console, its second-image
+ * fallback and its recovery web server are not modelled: a bad image stops
+ * the machine instead.
+ */
+#define NS_NAND_LINUX_OFF    0x00200000  /* MTD "linux" (board_ns.c, boot log) */
+#define NS_NAND_LINUX_SIZE   0x03e00000
+#define NS_TRX_MAGIC         0x30524448  /* "HDR0" */
+#define NS_TRX_HDR_LEN       28
+
+static uint32_t ns_trx_crc(const uint8_t *p, size_t n)
+{
+    static uint32_t tab[256];
+    uint32_t c = 0xffffffff;            /* hndcrc32: init ~0, no final xor */
+
+    if (!tab[1]) {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t v = i;
+
+            for (int k = 0; k < 8; k++) {
+                v = (v >> 1) ^ (0xedb88320 & -(v & 1));
+            }
+            tab[i] = v;
+        }
+    }
+    while (n--) {
+        c = tab[(c ^ *p++) & 0xff] ^ (c >> 8);
+    }
+    return c;
+}
+
+static bool ns_flash_boot_load(NSBoard *s, const char **err)
+{
+    uint8_t hdr[NS_TRX_HDR_LEN];
+    g_autofree uint8_t *trx = NULL;
+    g_autofree uint8_t *kernel = NULL;
+    uint32_t len, crc, off0, off1;
+    size_t klen;
+
+    if (!bcm_ns_nand_read(s->nand, NS_NAND_LINUX_OFF, hdr, sizeof(hdr))) {
+        *err = "flash too small for the linux partition";
+        return false;
+    }
+    len = ldl_le_p(hdr + 4);
+    crc = ldl_le_p(hdr + 8);
+    off0 = ldl_le_p(hdr + 16);
+    off1 = ldl_le_p(hdr + 20);
+    if (ldl_le_p(hdr) != NS_TRX_MAGIC) {
+        *err = "no TRX header (HDR0) at the start of the linux partition";
+        return false;
+    }
+    if (len < NS_TRX_HDR_LEN || len > NS_NAND_LINUX_SIZE) {
+        *err = "TRX length out of range";
+        return false;
+    }
+    trx = g_malloc(len);
+    bcm_ns_nand_read(s->nand, NS_NAND_LINUX_OFF, trx, len);
+    if (ns_trx_crc(trx + 12, len - 12) != crc) {
+        *err = "TRX CRC mismatch";
+        return false;
+    }
+    if (!off1) {
+        off1 = len;
+    }
+    if (off0 < NS_TRX_HDR_LEN || off1 <= off0 || off1 > len) {
+        *err = "TRX partition 0 out of range";
+        return false;
+    }
+    kernel = ns_lzma_alone_decode(trx + off0, off1 - off0,
+                                  NS_DRAM_LO_SIZE - NS_KERNEL_LOAD, &klen, err);
+    if (!kernel) {
+        return false;
+    }
+    address_space_write(&address_space_memory, NS_KERNEL_LOAD,
+                        MEMTXATTRS_UNSPECIFIED, kernel, klen);
+    info_report("bcm47094-router: booting the TRX kernel from flash "
+                "(%u bytes LZMA -> %zu bytes at 0x%x)",
+                off1 - off0, klen, NS_KERNEL_LOAD);
+    return true;
+}
+
+static void ns_flash_boot_reset(void *opaque)
+{
+    const char *err = NULL;
+
+    if (!ns_flash_boot_load(opaque, &err)) {
+        error_report("bcm47094-router: flash boot failed: %s", err);
+        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_PANIC);
+    }
+}
 
 /*
  * A CCA UART. tx-pacing: the stock kernel probes these as plain 16550s (no
@@ -400,6 +500,7 @@ static void ns_init(MachineState *machine)
         qdev_prop_set_uint32(nand, "config-cs0", 0x25152300);
         qdev_prop_set_uint32(nand, "acc-control-cs0", 0xc0080010);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(nand), &error_fatal);
+        s->nand = dinfo ? nand : NULL;
         sysbus_mmio_map(SYS_BUS_DEVICE(nand), 0, NS_NAND_REGS);
         sysbus_mmio_map_overlap(SYS_BUS_DEVICE(nand), 1, NS_NAND_WRAP, 1);
         sysbus_mmio_map(SYS_BUS_DEVICE(nand), 2, NS_NAND_WINDOW);
@@ -473,10 +574,20 @@ static void ns_init(MachineState *machine)
     bcm_ns_regfile_create("ns.dmu", NS_DMU_BASE, ns_dmu_init);
     bcm_ns_regfile_create("ns.ihost-cru", NS_IHOST_BASE, ns_ihost_init);
 
-    /* Kernel: raw Image at 0x8000, as CFE leaves it after LZMA decompression. */
+    /*
+     * Kernel: raw Image at 0x8000, as CFE leaves it after LZMA decompression.
+     * With -kernel, that file is loaded (and reloaded on every reset); without
+     * it, the kernel comes from the TRX in flash on every reset, as on the
+     * device, so a reset after a guest firmware upgrade boots the new kernel.
+     */
     if (!machine->kernel_filename) {
-        error_report("bcm47094-router: -kernel <raw Image from TRX partition 0> is required");
-        exit(1);
+        if (!s->nand) {
+            error_report("bcm47094-router: needs -kernel <raw Image> or a NAND "
+                         "image (-drive if=mtd) holding a TRX to boot from");
+            exit(1);
+        }
+        qemu_register_reset(ns_flash_boot_reset, s);
+        return;
     }
     if (load_image_targphys(machine->kernel_filename, NS_KERNEL_LOAD,
                             NS_DRAM_LO_SIZE - NS_KERNEL_LOAD, NULL) < 0) {

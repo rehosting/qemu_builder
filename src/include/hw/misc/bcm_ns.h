@@ -93,4 +93,12 @@ struct BCMNSRegFileState {
 BCMNSRegFileState *bcm_ns_regfile_create(const char *name, hwaddr base,
                                          const BCMNSRegInit *init);
 
+/* ---- NAND controller (hw/block/bcm_ns_nand.c) ---------------------------- */
+/*
+ * Copy len bytes of the flash's data area (OOB skipped), starting at data
+ * offset off, from the device's current contents (guest writes included).
+ * False if the range is outside the flash. For the board's CFE-style boot.
+ */
+bool bcm_ns_nand_read(DeviceState *dev, uint64_t off, void *buf, size_t len);
+
 #endif

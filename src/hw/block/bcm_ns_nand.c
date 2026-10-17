@@ -32,6 +32,7 @@
 #include "qemu/error-report.h"
 #include "system/runstate.h"
 #include "qom/object.h"
+#include "hw/misc/bcm_ns.h"
 
 #define TYPE_BCM_NS_NAND "bcm-ns-nand"
 OBJECT_DECLARE_SIMPLE_TYPE(BCMNSNandState, BCM_NS_NAND)
@@ -134,6 +135,27 @@ static uint32_t spare_per_sector(BCMNSNandState *s)
 static uint8_t *page_data(BCMNSNandState *s, uint64_t page)
 {
     return s->storage + page * nand_raw_page(s);
+}
+
+bool bcm_ns_nand_read(DeviceState *dev, uint64_t off, void *buf, size_t len)
+{
+    BCMNSNandState *s = BCM_NS_NAND(dev);
+    uint8_t *out = buf;
+
+    if (off > nand_size(s) || len > nand_size(s) - off) {
+        return false;
+    }
+    while (len) {
+        uint64_t page = off / s->page_size;
+        uint32_t in = off % s->page_size;
+        size_t n = MIN(len, s->page_size - in);
+
+        memcpy(out, page_data(s, page) + in, n);
+        out += n;
+        off += n;
+        len -= n;
+    }
+    return true;
 }
 
 static void nand_flush_page(BCMNSNandState *s, uint64_t page)
