@@ -78,6 +78,7 @@
 #define D64_CTRL2_BC        0x7fff
 
 #define RX_HDR_LEN          28
+#define RX_HDR_MIN          4           /* len + flags */
 #define ETH_FCS_LEN         4
 
 static void gmac_update_irq(BCMNSGmacState *s)
@@ -168,7 +169,10 @@ void bcm_ns_gmac_receive(BCMNSGmacState *s, const uint8_t *buf, size_t len)
         return;
     }
     d64_desc(s, ring, s->rx_cd, d);
-    if (ro < RX_HDR_LEN || ro + len + ETH_FCS_LEN > (d[1] & D64_CTRL2_BC)) {
+    /* the receive offset (RO) leaves room for the status header; drivers use
+     * 30 (header + 2 for IP alignment) or 14, so only the 4-byte length/flags
+     * word has to fit, and the header is written up to RO */
+    if (ro < RX_HDR_MIN || ro + len + ETH_FCS_LEN > (d[1] & D64_CTRL2_BC)) {
         /* would need a multi-buffer frame; et does not enable DMA_CTRL_RXMULTI */
         s->rx_dropped++;
         return;
@@ -178,7 +182,8 @@ void bcm_ns_gmac_receive(BCMNSGmacState *s, const uint8_t *buf, size_t len)
     address_space_write(&address_space_memory, d[2] + ro + len, MEMTXATTRS_UNSPECIFIED,
                         fcs, ETH_FCS_LEN);
     stw_le_p(hdr, len + ETH_FCS_LEN);
-    address_space_write(&address_space_memory, d[2], MEMTXATTRS_UNSPECIFIED, hdr, sizeof(hdr));
+    address_space_write(&address_space_memory, d[2], MEMTXATTRS_UNSPECIFIED, hdr,
+                        MIN(ro, sizeof(hdr)));
     s->rx_cd = d64_next(s->rx_cd, d[0]);
     s->regs[GMAC_INT_STATUS / 4] |= INT_RX;
     gmac_update_irq(s);

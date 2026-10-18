@@ -86,8 +86,29 @@
 #define NS_PERIPH_HZ         (NS_ARM_HZ / 2)
 #define NS_ALP_HZ            125000000u  /* si_ns_alp_clock() from GENPLL below */
 
-/* ChipCommon-A identity: chip 53030 (BCM47094), rev 0, pkg 0 (4709), AI bus. */
-#define NS_CC_CHIPID         ((1u << 28) | (0u << 20) | (0u << 16) | 53030u)
+/* ChipCommon-A identity: chip, rev, package, AI bus (bcmdevs.h). */
+#define NS_CC_CHIPID(chip, pkg, rev) ((1u << 28) | ((pkg) << 20) | ((rev) << 16) | (chip))
+
+/*
+ * Northstar parts this board model runs. They differ, as far as their vendor
+ * kernels look, in the ChipCommon chip id (which also picks head.S's ACP path
+ * for 53030 and the per-chip quirks in the SDK's siutils) and the DDR fitted.
+ */
+typedef struct NSVariant {
+    const char *name;
+    uint32_t chipid;
+    uint64_t ram_size;
+    bool rtl8365mb;     /* second switch on BCM53012 port 5, else GMAC0 there */
+} NSVariant;
+
+/* BCM47094 (4709C0): chip 53030, pkg 0 (4709), 512 MiB */
+static const NSVariant ns_bcm47094 = {
+    "bcm47094-router", NS_CC_CHIPID(53030u, 0u, 0u), 512 * MiB, true,
+};
+/* BCM4708: chip 53010, pkg 2 (BCM4708_PKG_ID), rev 0 [assume], 256 MiB */
+static const NSVariant ns_bcm4708 = {
+    "bcm4708-router", NS_CC_CHIPID(53010u, 2u, 0u), 256 * MiB, false,
+};
 /* [assume] capabilities: 2 UARTs, UART clock = ALP (sel 0), no flash type
  * (mainline: "Flash type not supported"), no PMU, no SROM/OTP. */
 #define NS_CC_CAPS           0x00000002u
@@ -218,8 +239,9 @@ static const BCMNSRegInit ns_ihost_init[] = {
 
 typedef struct {
     ARMCPU *cpu[2];
-    MemoryRegion dram_lo, dram_acp[2], dram_hi_wrap, rom, erom;
+    MemoryRegion dram_lo, dram_acp[4], dram_hi_wrap[3], rom, erom;
     DeviceState *nand;
+    const char *name;                   /* machine type, for messages */
 } NSBoard;
 
 /*
@@ -301,9 +323,9 @@ static bool ns_flash_boot_load(NSBoard *s, const char **err)
     }
     address_space_write(&address_space_memory, NS_KERNEL_LOAD,
                         MEMTXATTRS_UNSPECIFIED, kernel, klen);
-    info_report("bcm47094-router: booting the TRX kernel from flash "
+    info_report("%s: booting the TRX kernel from flash "
                 "(%u bytes LZMA -> %zu bytes at 0x%x)",
-                off1 - off0, klen, NS_KERNEL_LOAD);
+                s->name, off1 - off0, klen, NS_KERNEL_LOAD);
     return true;
 }
 
@@ -312,7 +334,7 @@ static void ns_flash_boot_reset(void *opaque)
     const char *err = NULL;
 
     if (!ns_flash_boot_load(opaque, &err)) {
-        error_report("bcm47094-router: flash boot failed: %s", err);
+        error_report("%s: flash boot failed: %s", ((NSBoard *)opaque)->name, err);
         qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_PANIC);
     }
 }
@@ -364,15 +386,22 @@ static void ns_map_dram(NSBoard *s, MachineState *machine)
 
     /*
      * The DDR controller decodes each 1 GiB window modulo the fitted size, so
-     * 512 MiB appears twice in it. plat-head.S szmem finds the size by writing
-     * at 0x80000000+N and looking for the write at 0x80000000.
+     * 512 MiB appears twice in it and 256 MiB four times. plat-head.S szmem
+     * finds the size by writing at 0x80000000+N and looking for the write at
+     * 0x80000000.
      */
-    memory_region_add_subregion(sysmem, NS_DRAM_HI_BASE, machine->ram);
-    memory_region_init_alias(&s->dram_hi_wrap, NULL, "ns.dram-hi-wrap",
-                             machine->ram, 0, sz);
-    memory_region_add_subregion(sysmem, NS_DRAM_HI_BASE + sz, &s->dram_hi_wrap);
+    int copies = NS_DRAM_WINDOW / sz;
 
-    for (int i = 0; i < 2; i++) {
+    assert(copies >= 1 && copies <= 4 && sz * copies == NS_DRAM_WINDOW);
+    memory_region_add_subregion(sysmem, NS_DRAM_HI_BASE, machine->ram);
+    for (int i = 1; i < copies; i++) {
+        memory_region_init_alias(&s->dram_hi_wrap[i - 1], NULL, "ns.dram-hi-wrap",
+                                 machine->ram, 0, sz);
+        memory_region_add_subregion(sysmem, NS_DRAM_HI_BASE + i * sz,
+                                    &s->dram_hi_wrap[i - 1]);
+    }
+
+    for (int i = 0; i < copies; i++) {
         memory_region_init_alias(&s->dram_acp[i], NULL, "ns.dram-acp",
                                  machine->ram, 0, sz);
         memory_region_add_subregion(sysmem, NS_DRAM_ACP_BASE + i * sz, &s->dram_acp[i]);
@@ -393,19 +422,21 @@ static void ns_robo_to_rtl(void *opaque, const uint8_t *buf, size_t len)
     rtl8365mb_from_uplink(RTL8365MB(opaque), buf, len);
 }
 
-static void ns_init(MachineState *machine)
+static void ns_init(MachineState *machine, const NSVariant *v)
 {
     NSBoard *s = g_new0(NSBoard, 1);
     MemoryRegion *sysmem = get_system_memory();
-    DeviceState *mpcore, *cc, *idm;
+    DeviceState *mpcore, *cc, *idm, *sw;
     SysBusDevice *busdev;
     qemu_irq cpu_irq[2];
     uint32_t erom[256];
     size_t erom_words;
     int n;
 
-    if (machine->ram_size != 512 * MiB) {
-        error_report("bcm47094-router: the board has 512 MiB of DDR3 (-m 512)");
+    s->name = v->name;
+    if (machine->ram_size != v->ram_size) {
+        error_report("%s: the board has %" PRIu64 " MiB of DDR3 (-m %" PRIu64 ")",
+                     v->name, v->ram_size / MiB, v->ram_size / MiB);
         exit(1);
     }
 
@@ -462,7 +493,7 @@ static void ns_init(MachineState *machine)
 
     /* ChipCommon-A; the UARTs sit on top of its register block. */
     cc = qdev_new(TYPE_BCM_NS_CHIPCOMMON);
-    qdev_prop_set_uint32(cc, "chipid", NS_CC_CHIPID);
+    qdev_prop_set_uint32(cc, "chipid", v->chipid);
     qdev_prop_set_uint32(cc, "capabilities", NS_CC_CAPS);
     qdev_prop_set_uint32(cc, "eromptr", NS_EROM_BASE);
     qdev_prop_set_uint32(cc, "watchdog-hz", NS_ALP_HZ);
@@ -507,12 +538,12 @@ static void ns_init(MachineState *machine)
     }
 
     /* Ethernet. GMAC2 is the IMP port (8) of the BCM53012, GMAC1 is port 7,
-     * GMAC0 is not wired (port 5 carries the RTL8365MB), GMAC3 is unused.
+     * GMAC0 is port 5 unless port 5 carries the RTL8365MB, GMAC3 is unused.
      * The first -nic goes to LAN1 (switch port 3), a second (or model=wan)
      * to WAN (port 4); -global bcm53012.netdev-pN=<id> picks any port 0-4. */
+    sw = qdev_new(TYPE_BCM53012);
     {
-        DeviceState *sw = qdev_new(TYPE_BCM53012);
-        DeviceState *gmac[4], *rtl;
+        DeviceState *gmac[4];
         static const struct { int port; const char *alias; } ext[] = {
             { 3, "lan" }, { 4, "wan" },
         };
@@ -540,6 +571,13 @@ static void ns_init(MachineState *machine)
         }
         bcm53012_connect_gmac(BCM53012(sw), 7, BCM_NS_GMAC(gmac[1]));
         bcm53012_connect_gmac(BCM53012(sw), 8, BCM_NS_GMAC(gmac[2]));
+        if (!v->rtl8365mb) {
+            bcm53012_connect_gmac(BCM53012(sw), 5, BCM_NS_GMAC(gmac[0]));
+        }
+    }
+
+    if (v->rtl8365mb) {
+        DeviceState *rtl;
 
         /* RTL8365MB: Realtek SMI on GPIO 6 (SCK) / 7 (SDA), reset on GPIO 10
          * (active low); EXT1 RGMII into BCM53012 port 5. UTP ports 0-3 are
@@ -582,8 +620,8 @@ static void ns_init(MachineState *machine)
      */
     if (!machine->kernel_filename) {
         if (!s->nand) {
-            error_report("bcm47094-router: needs -kernel <raw Image> or a NAND "
-                         "image (-drive if=mtd) holding a TRX to boot from");
+            error_report("%s: needs -kernel <raw Image> or a NAND "
+                         "image (-drive if=mtd) holding a TRX to boot from", v->name);
             exit(1);
         }
         qemu_register_reset(ns_flash_boot_reset, s);
@@ -591,21 +629,44 @@ static void ns_init(MachineState *machine)
     }
     if (load_image_targphys(machine->kernel_filename, NS_KERNEL_LOAD,
                             NS_DRAM_LO_SIZE - NS_KERNEL_LOAD, NULL) < 0) {
-        error_report("bcm47094-router: could not load kernel '%s'", machine->kernel_filename);
+        error_report("%s: could not load kernel '%s'", v->name, machine->kernel_filename);
         exit(1);
     }
+}
+
+static void ns_init_bcm47094(MachineState *machine)
+{
+    ns_init(machine, &ns_bcm47094);
+}
+
+static void ns_init_bcm4708(MachineState *machine)
+{
+    ns_init(machine, &ns_bcm4708);
+}
+
+static void ns_machine_common(MachineClass *mc, const NSVariant *v)
+{
+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-a9");
+    mc->max_cpus = 2;
+    mc->min_cpus = 2;
+    mc->default_cpus = 2;
+    mc->default_ram_size = v->ram_size;
+    mc->default_ram_id = "ns.dram";
 }
 
 static void ns_machine_init(MachineClass *mc)
 {
     mc->desc = "Broadcom BCM47094 Northstar router board (Cortex-A9 MPCore)";
-    mc->init = ns_init;
-    mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-a9");
-    mc->max_cpus = 2;
-    mc->min_cpus = 2;
-    mc->default_cpus = 2;
-    mc->default_ram_size = 512 * MiB;
-    mc->default_ram_id = "ns.dram";
+    mc->init = ns_init_bcm47094;
+    ns_machine_common(mc, &ns_bcm47094);
+}
+
+static void ns4708_machine_init(MachineClass *mc)
+{
+    mc->desc = "Broadcom BCM4708 Northstar router board (Cortex-A9 MPCore)";
+    mc->init = ns_init_bcm4708;
+    ns_machine_common(mc, &ns_bcm4708);
 }
 
 DEFINE_MACHINE_ARM("bcm47094-router", ns_machine_init)
+DEFINE_MACHINE_ARM("bcm4708-router", ns4708_machine_init)
