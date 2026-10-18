@@ -100,7 +100,7 @@ class Hypercall:
 plugins.kffi = KFFI(isf)
 from compat.qemu_compat import QemuCompat  # noqa: E402
 
-qarch = {'x86_64': 'x86_64', 'aarch64': 'aarch64'}[parch]
+qarch = {'x86_64': 'x86_64', 'aarch64': 'aarch64', 'armel': 'armel'}[parch]
 panda = QemuCompat(lib_path, qarch, mode='system')
 Plugin.panda = panda
 Plugin.args = {'outdir': os.path.dirname(os.path.abspath(log_path)), 'backend': 'trap',
@@ -116,7 +116,7 @@ plugins.mem = Mem()
 plugins.syscalls = Syscalls()
 trap = plugins.syscalls._trap
 assert trap is not None
-ABIS = ['x86_64', 'i386', 'aarch64', 'arm']
+ABIS = ['x86_64', 'i386', 'aarch64', 'arm', 'arm_oabi']
 
 counts = {}
 closed = [0]
@@ -335,12 +335,16 @@ def scenario_inject():
         x = yield from inject('execve', 0, 0, 0)     # fails (-EFAULT), comes back
         k = yield from inject('clone', 0x11, 0, 0, 0, 0)   # refused: the child
         out(f'SC data tag=inj-enosys ret={e} execve={x} clone={k}')
-        skip(sc, e if x == -14 and k is None else -1)
+        # a 32-bit ARM kernel has no exec hook yet: execve is refused there
+        skip(sc, e if (x is None if sc.abi == 3 else x == -14) and k is None else -1)
     hook('getpgid', enosys, enter=True, arg_filters=[9402])
 
     def procread(regs, proto, sc, fd, buf, n):
         count(sc, 'inj-proc')
-        m = yield from inject('mmap', 0, 4096, 3, 0x22, -1, 0)      # RW, private anon
+        # RW, private anon; a 32-bit ARM kernel's EABI has mmap2 only, and
+        # there the engine raises no faults: MAP_POPULATE
+        m = yield from inject('mmap2' if sc.abi == 3 else 'mmap', 0, 4096, 3,
+                              0x22 | (0x8000 if sc.abi == 3 else 0), -1, 0)
         w = yield from plugins.mem.write_bytes(m, b'/proc/self/stat\0')
         f = yield from inject('openat', -100, m, 0, 0)               # AT_FDCWD, O_RDONLY
         k = yield from inject('read', f, m, 4096)
