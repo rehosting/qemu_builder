@@ -32,6 +32,14 @@
  *   frame_r0=<off>     offset of saved r0 (S_R0, 0)
  *   frame_orig_r0=<off> offset of ORIG_r0 (S_OLD_R0, 68)
  *   skip=<n>           let n eligible syscalls pass before injecting (0)
+ *   abi=eabi|oabi      the kernel's syscall ABI (eabi). An OABI kernel takes
+ *                      the number from the SWI immediate (swi 0x9000NN), so
+ *                      hook= must be after vector_swi decodes it into r7
+ *                      ("eor r7, r7, #0x900000"; 3.4: vector_swi+0x4c), where
+ *                      writing r7 sets the number. r8 is no longer SPSR
+ *                      there, so SPSR is read from the frame instead.
+ *   frame_psr=<off>    offset of the saved CPSR in the frame (S_PSR, 64),
+ *                      for abi=oabi
  *
  * AArch64 works the same way, with these differences:
  *   - hook= is an instruction where a register holds the pt_regs pointer of
@@ -71,6 +79,8 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 #define PROT_RW         0x3
 #define MAP_FLAGS       (0x02 | 0x20 | 0x8000)  /* PRIVATE|ANONYMOUS|POPULATE */
 #define SWI_ARM_EABI    0xef000000u
+#define SWI_ARM_OABI    0x0f900000u     /* swi 0x9000NN, condition ignored */
+#define SWI_ARM_OABI_M  0x0ff00000u
 #define SWI_THUMB       0xdf00u
 #define PSR_T           0x20u
 #define PSR_MODE        0x1fu
@@ -89,7 +99,8 @@ enum step { ARMED, MMAPPED, LOADED, UNMAPPED, DONE };
 static qemu_plugin_id_t plugin_id;
 static GMutex lock;
 static uint64_t hook_va;
-static uint32_t off_pc = 60, off_r0 = 0, off_orig_r0 = 68;
+static uint32_t off_pc = 60, off_r0 = 0, off_orig_r0 = 68, off_psr = 64;
+static bool oabi;
 static unsigned long skip;
 static char *ko_path, *params = "";
 static GByteArray *ko;
@@ -174,8 +185,13 @@ static void all_done(void *u)
 
 static void on_swi(unsigned int vcpu, void *u)
 {
-    uint32_t spsr = rd(reg[8]);
     uint32_t frame = rd(reg[13]);
+    uint32_t spsr = 0;
+    if (!oabi) {
+        spsr = rd(reg[8]);
+    } else if (!rd_mem32(frame + off_psr, &spsr)) {
+        return;
+    }
     uint32_t lr = rd(reg[14]);
     uint32_t task = frame >> THREAD_SHIFT;
 
@@ -186,12 +202,17 @@ static void on_swi(unsigned int vcpu, void *u)
     g_mutex_lock(&lock);
     switch (step) {
     case ARMED: {
-        /* EABI only: OABI takes the number from the SWI immediate, not r7 */
+        /* EABI: svc #0 with the number in r7. OABI: swi 0x9000NN, already
+         * decoded into r7 at the hook, so r7 is what the kernel indexes by. */
         uint32_t insn = 0, pc = (spsr & PSR_T) ? lr - 2 : lr - 4;
         if (!rd_mem32(pc & ~3u, &insn)) {
             break;
         }
-        if (spsr & PSR_T) {
+        if (oabi) {
+            if ((spsr & PSR_T) || (insn & SWI_ARM_OABI_M) != SWI_ARM_OABI) {
+                break;
+            }
+        } else if (spsr & PSR_T) {
             insn = (pc & 2) ? insn >> 16 : insn & 0xffff;
             if (insn != SWI_THUMB) {
                 break;
@@ -514,6 +535,15 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
                 a64_frame_sp = true;
             } else if (strcmp(kv[1], "x0")) {
                 fprintf(stderr, "kmodinject: frame must be x0 or sp\n");
+                return -1;
+            }
+        } else if (!strcmp(kv[0], "frame_psr")) {
+            off_psr = g_ascii_strtoull(kv[1], NULL, 0);
+        } else if (!strcmp(kv[0], "abi") && !a64) {
+            if (!strcmp(kv[1], "oabi")) {
+                oabi = true;
+            } else if (strcmp(kv[1], "eabi")) {
+                fprintf(stderr, "kmodinject: abi must be eabi or oabi\n");
                 return -1;
             }
         } else if (!strcmp(kv[0], "skip")) {
