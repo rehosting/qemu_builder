@@ -44,7 +44,9 @@
  *
  * TX      A frame the guest sent on a radio interface.
  *         guest -> radio, bss, len, payload = the Ethernet frame.
- *         host  -> status 0, len 0.
+ *         host  -> status 0, len 0, more = 1 if a station (a host peer)
+ *                  took the frame, so answers may follow: the guest then
+ *                  polls promptly for a while.
  *
  * POLL    Collect queued host -> guest work.
  *         guest -> len 0.
