@@ -108,7 +108,28 @@ typedef struct NSVariant {
     uint32_t gpio_pads; /* level of each undriven GPIO pad (board wiring) */
     uint32_t gmac_iostatus[4];  /* GMAC0-3 IDM iostatus */
     uint32_t gmac_fifo_data[4]; /* GMAC0-3 +0x128 */
+    const BCMNSGpioPin *pins;   /* named buttons and LEDs, or NULL */
 } NSVariant;
+
+/*
+ * BCM47094 board buttons and LEDs: the pins the stock rc reads from a unit's
+ * nvram (btn_*_gpio, led_*_gpio; bit 12 = active low). Pins set to 255
+ * there (the radio LEDs, driven by the radios) are left out, and so is
+ * pwr_usb_gpio (9, the USB power switch, not an LED; gpio9 drives it).
+ */
+static const BCMNSGpioPin ns_bcm47094_pins[] = {
+    { "reset", 11, BCM_NS_PIN_BUTTON, true },   /* btn_rst_gpio   0x100b */
+    { "wps",   20, BCM_NS_PIN_BUTTON, true },   /* btn_wps_gpio   0x1014 */
+    { "led",    4, BCM_NS_PIN_BUTTON, true },   /* btn_led_gpio   0x1004 */
+    { "wltog", 18, BCM_NS_PIN_BUTTON, true },   /* btn_wltog_gpio 0x1012 */
+    { "pwr",    3, BCM_NS_PIN_LED,    true },   /* led_pwr_gpio   0x1003 */
+    { "wan",    5, BCM_NS_PIN_LED,    false },  /* led_wan_gpio   5 */
+    { "usb",   16, BCM_NS_PIN_LED,    true },   /* led_usb_gpio   0x1010 */
+    { "usb3",  17, BCM_NS_PIN_LED,    true },   /* led_usb3_gpio  0x1011 */
+    { "wps",   19, BCM_NS_PIN_LED,    true },   /* led_wps_gpio   0x1013 */
+    { "lan",   21, BCM_NS_PIN_LED,    true },   /* led_lan_gpio   0x1015 */
+    { NULL }
+};
 
 /*
  * BCM47094 (4709C0): chip 53030, pkg 0 (4709), 512 MiB. The GPIO pad levels
@@ -120,13 +141,15 @@ typedef struct NSVariant {
 static const NSVariant ns_bcm47094 = {
     "bcm47094-router", NS_CC_CHIPID(53030u, 0u, 0u), 512 * MiB, true,
     0x001f0ef4, { 0x0001f000, 0x0001b001, 0x00003001, 0x0001b000 },
-    { 0x0000019e, 0x0000003c, 0x00001597, 0x0000032b },
+    { 0x0000019e, 0x0000003c, 0x00001597, 0x0000032b }, ns_bcm47094_pins,
 };
 /* BCM4708: chip 53010, pkg 2 (BCM4708_PKG_ID), rev 0 [assume], 256 MiB;
- * [assume] pads pulled up, iostatus DMA64 only, GMAC +0x128 reads 0. */
+ * [assume] pads pulled up, iostatus DMA64 only, GMAC +0x128 reads 0. No
+ * named buttons or LEDs (its firmware's pin map is not known); the gpio<N>
+ * properties still drive any pin. */
 static const NSVariant ns_bcm4708 = {
     "bcm4708-router", NS_CC_CHIPID(53010u, 2u, 0u), 256 * MiB, false,
-    0x00ffffff, { 0x1000, 0x1000, 0x1000, 0x1000 }, { 0, 0, 0, 0 },
+    0x00ffffff, { 0x1000, 0x1000, 0x1000, 0x1000 }, { 0, 0, 0, 0 }, NULL,
 };
 /*
  * ChipCommon state as CFE leaves it, read on a BCM47094 unit:
@@ -584,6 +607,11 @@ static void ns_init(MachineState *machine, const NSVariant *v)
     qdev_prop_set_uint32(cc, "gpio-pullup-in", v->gpio_pads);
     qdev_prop_set_uint32(cc, "eromptr", NS_EROM_BASE);
     qdev_prop_set_uint32(cc, "watchdog-hz", NS_ALP_HZ);
+    if (v->pins) {
+        bcm_ns_cc_set_pins(BCM_NS_CHIPCOMMON(cc), v->pins);
+    }
+    /* /machine/chipcommon: qom-set /machine/chipcommon button-reset true */
+    object_property_add_child(OBJECT(machine), "chipcommon", OBJECT(cc));
     sysbus_realize_and_unref(SYS_BUS_DEVICE(cc), &error_fatal);
     sysbus_mmio_map_overlap(SYS_BUS_DEVICE(cc), 0, NS_CCA_BASE, -1);
     sysbus_connect_irq(SYS_BUS_DEVICE(cc), 0, qdev_get_gpio_in(mpcore, NS_SPI_CCA));

@@ -17,6 +17,24 @@ OBJECT_DECLARE_SIMPLE_TYPE(BCMNSChipCommonState, BCM_NS_CHIPCOMMON)
 
 #define BCM_NS_CC_NGPIO 24
 
+/*
+ * A board's buttons and LEDs, by GPIO pin. Each gets QOM properties on the
+ * ChipCommon device (see bcm_ns.c): button-<name> (bool, true = held) and
+ * led-<name> (bool, read-only, true = lit), plus the "buttons" and "leds"
+ * summaries.
+ */
+typedef enum BCMNSPinKind {
+    BCM_NS_PIN_BUTTON,
+    BCM_NS_PIN_LED,
+} BCMNSPinKind;
+
+typedef struct BCMNSGpioPin {
+    const char *name;                   /* NULL terminates the table */
+    uint8_t pin;
+    BCMNSPinKind kind;
+    bool active_low;
+} BCMNSGpioPin;
+
 struct BCMNSChipCommonState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
@@ -50,7 +68,15 @@ struct BCMNSChipCommonState {
     uint32_t watchdog;
     uint32_t clkdiv;
     uint32_t uart_irq_level;           /* bit n = UART n interrupt line */
+
+    /* buttons and LEDs */
+    const BCMNSGpioPin *pins;
+    uint32_t led_on;                   /* bit n = the LED on pin n is lit */
+    uint32_t led_changes[BCM_NS_CC_NGPIO];
 };
+
+/* Name the board's buttons and LEDs (before realize); pins must outlive cc. */
+void bcm_ns_cc_set_pins(BCMNSChipCommonState *s, const BCMNSGpioPin *pins);
 
 /* ---- IDM / DMP wrappers (one 4 KiB page per core) ----------------------- */
 #define TYPE_BCM_NS_IDM "bcm-ns-idm"

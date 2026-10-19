@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Mon, 19 Oct 2026 13:41:29 -0400
+Subject: [PATCH] hw/misc: trace events for the BCM47094 ChipCommon GPIOs
+
+Adds four trace points for src/hw/misc/bcm_ns.c, the board's ChipCommon
+model: every GPIO pin level change (bcm_ns_gpio_level), a pin driven over
+QOM (bcm_ns_gpio_drive), a named button held or released
+(bcm_ns_button) and a named LED turning on or off (bcm_ns_led). Like patch
+0016, this only touches the upstream file that declares them; the code
+using them is the vendored source.
+---
+ hw/misc/trace-events | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/hw/misc/trace-events b/hw/misc/trace-events
+index c9a868b3efb9d6363154d663e47c9a92ca37148d..e8d599902aac97cb7befb329e91fdc175b365edf 100644
+--- a/hw/misc/trace-events
++++ b/hw/misc/trace-events
+@@ -442,3 +442,9 @@ iommu_testdev_dma_read(uint64_t gva, uint32_t len) "gva=0x%" PRIx64 " len=%u"
+ iommu_testdev_dma_verify(uint32_t expected, uint32_t actual) "expected=0x%x actual=0x%x"
+ iommu_testdev_dma_result(uint32_t result) "DMA completed result=0x%x"
+ iommu_testdev_dma_armed(bool armed) "armed=%d"
++
++# bcm_ns.c
++bcm_ns_gpio_level(unsigned pin, unsigned level) "gpio%u -> %u"
++bcm_ns_gpio_drive(unsigned pin, const char *how) "gpio%u driven %s"
++bcm_ns_button(const char *name, const char *how) "button %s %s"
++bcm_ns_led(const char *name, const char *state) "led %s %s"

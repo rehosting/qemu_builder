@@ -1,7 +1,8 @@
 /*
  * Broadcom Northstar (BCM4708/4709/47094) SoC backplane devices:
  *   - ChipCommon-A register block (chip id, caps, EROM pointer, interrupt
- *     gating for the two CCA UARTs, 24 GPIOs, watchdog)
+ *     gating for the two CCA UARTs, 24 GPIOs, watchdog), with the board's
+ *     buttons and LEDs as QOM properties
  *   - IDM/DMP wrapper pages (ioctrl / iostatus / resetctrl)
  *   - a register file with reset values, used for the DMU/CRU and the iHost
  *     clock-reset unit, whose only kernel-visible behaviour is "read back what
@@ -13,11 +14,13 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/misc/bcm_ns.h"
 #include "migration/vmstate.h"
 #include "system/runstate.h"
+#include "trace.h"
 
 /* ======================================================================== */
 /* ChipCommon-A                                                             */
@@ -88,6 +91,7 @@ static void cc_gpio_outputs(BCMNSChipCommonState *s, uint32_t old_level)
 
     for (int i = 0; i < BCM_NS_CC_NGPIO; i++) {
         if (changed & (1u << i)) {
+            trace_bcm_ns_gpio_level(i, (level >> i) & 1);
             qemu_set_irq(s->gpio_out[i], (level >> i) & 1);
         }
     }
@@ -103,17 +107,56 @@ static void cc_gpio_event(BCMNSChipCommonState *s, uint32_t old_in)
                     (falling & s->gpioeventintpolarity);
 }
 
-/* External drive of a pin (button, switch SMI data line, ...). */
-static void cc_gpio_set(void *opaque, int n, int level)
+/*
+ * LEDs: lit when the pin is an output driven to its active level. An LED on
+ * an input pin is dark whatever the pad reads.
+ */
+static uint32_t cc_leds_lit(BCMNSChipCommonState *s)
 {
-    BCMNSChipCommonState *s = opaque;
+    uint32_t on = 0;
+
+    for (const BCMNSGpioPin *p = s->pins; p && p->name; p++) {
+        if (p->kind == BCM_NS_PIN_LED && extract32(s->gpioouten, p->pin, 1) &&
+            extract32(s->gpioout, p->pin, 1) != p->active_low) {
+            on |= 1u << p->pin;
+        }
+    }
+    return on;
+}
+
+static void cc_update_leds(BCMNSChipCommonState *s)
+{
+    uint32_t on = cc_leds_lit(s), changed = on ^ s->led_on;
+
+    for (const BCMNSGpioPin *p = s->pins; changed && p && p->name; p++) {
+        if (p->kind == BCM_NS_PIN_LED && (changed & (1u << p->pin))) {
+            s->led_changes[p->pin]++;
+            trace_bcm_ns_led(p->name, (on >> p->pin) & 1 ? "on" : "off");
+        }
+    }
+    s->led_on = on;
+}
+
+/* Drive pin n externally to level (0/1), or release it (-1) to its pad level. */
+static void cc_gpio_drive(BCMNSChipCommonState *s, int n, int level)
+{
     uint32_t old = cc_gpioin(s);
 
-    s->gpio_ext_driven |= 1u << n;
-    s->gpio_ext_level = deposit32(s->gpio_ext_level, n, 1, !!level);
+    if (level < 0) {
+        s->gpio_ext_driven &= ~(1u << n);
+    } else {
+        s->gpio_ext_driven |= 1u << n;
+        s->gpio_ext_level = deposit32(s->gpio_ext_level, n, 1, !!level);
+    }
     cc_gpio_event(s, old);
     cc_gpio_outputs(s, old);
     cc_update_irq(s);
+}
+
+/* External drive of a pin (switch SMI data line, ...). */
+static void cc_gpio_set(void *opaque, int n, int level)
+{
+    cc_gpio_drive(opaque, n, !!level);
 }
 
 static void cc_uart_irq(void *opaque, int n, int level)
@@ -216,6 +259,7 @@ static void cc_write(void *opaque, hwaddr addr, uint64_t val64, unsigned size)
     cc_gpio_event(s, old_in);
     cc_gpio_outputs(s, old_in);
     cc_update_irq(s);
+    cc_update_leds(s);
 }
 
 static const MemoryRegionOps cc_ops = {
@@ -242,6 +286,141 @@ static void cc_reset(DeviceState *dev)
     s->gpiotimerval = s->gpiotimeroutmask = 0;
     s->watchdog = 0;
     s->clkdiv = s->clkdiv_reset;
+    cc_update_leds(s);
+}
+
+/*
+ * QOM interface for the pins (qom-get / qom-set on the ChipCommon device):
+ *   gpio<N>        str: reads the level the guest sees, "0" or "1"; write
+ *                  "0" or "1" to drive the pad, "z" to release it to its
+ *                  board level. Driving an output pin changes nothing.
+ *   button-<name>  bool: true holds the button (drives its active level),
+ *                  false releases it.
+ *   led-<name>     bool, read-only: the LED is lit.
+ *   buttons, leds  str, read-only: "name:held|released ..." and
+ *                  "name:on|off:<changes> ..." (changes since power-on).
+ * LED changes are also trace events (bcm_ns_led), and every pin level
+ * change is bcm_ns_gpio_level.
+ */
+static void cc_get_gpio(Object *obj, Visitor *v, const char *name,
+                        void *opaque, Error **errp)
+{
+    BCMNSChipCommonState *s = BCM_NS_CHIPCOMMON(obj);
+    char *val = g_strdup(extract32(cc_gpioin(s), (uintptr_t)opaque, 1) ? "1" : "0");
+
+    visit_type_str(v, name, &val, errp);
+    g_free(val);
+}
+
+static void cc_set_gpio(Object *obj, Visitor *v, const char *name,
+                        void *opaque, Error **errp)
+{
+    BCMNSChipCommonState *s = BCM_NS_CHIPCOMMON(obj);
+    g_autofree char *val = NULL;
+    int level;
+
+    if (!visit_type_str(v, name, &val, errp)) {
+        return;
+    }
+    if (!strcmp(val, "0") || !strcmp(val, "1")) {
+        level = val[0] - '0';
+    } else if (!strcmp(val, "z")) {
+        level = -1;
+    } else {
+        error_setg(errp, "%s: \"%s\" is not 0, 1 or z", name, val);
+        return;
+    }
+    trace_bcm_ns_gpio_drive((uintptr_t)opaque, val);
+    cc_gpio_drive(s, (uintptr_t)opaque, level);
+}
+
+static bool cc_button_held(BCMNSChipCommonState *s, const BCMNSGpioPin *p)
+{
+    return extract32(s->gpio_ext_driven, p->pin, 1) &&
+           extract32(s->gpio_ext_level, p->pin, 1) != p->active_low;
+}
+
+static void cc_get_button(Object *obj, Visitor *v, const char *name,
+                          void *opaque, Error **errp)
+{
+    bool held = cc_button_held(BCM_NS_CHIPCOMMON(obj), opaque);
+
+    visit_type_bool(v, name, &held, errp);
+}
+
+static void cc_set_button(Object *obj, Visitor *v, const char *name,
+                          void *opaque, Error **errp)
+{
+    const BCMNSGpioPin *p = opaque;
+    bool held;
+
+    if (!visit_type_bool(v, name, &held, errp)) {
+        return;
+    }
+    trace_bcm_ns_button(p->name, held ? "held" : "released");
+    cc_gpio_drive(BCM_NS_CHIPCOMMON(obj), p->pin, held ? !p->active_low : -1);
+}
+
+static void cc_get_led(Object *obj, Visitor *v, const char *name,
+                       void *opaque, Error **errp)
+{
+    const BCMNSGpioPin *p = opaque;
+    bool lit = extract32(BCM_NS_CHIPCOMMON(obj)->led_on, p->pin, 1);
+
+    visit_type_bool(v, name, &lit, errp);
+}
+
+static char *cc_summary(BCMNSChipCommonState *s, BCMNSPinKind kind)
+{
+    GString *out = g_string_new(NULL);
+
+    for (const BCMNSGpioPin *p = s->pins; p && p->name; p++) {
+        if (p->kind != kind) {
+            continue;
+        }
+        if (out->len) {
+            g_string_append_c(out, ' ');
+        }
+        if (kind == BCM_NS_PIN_BUTTON) {
+            g_string_append_printf(out, "%s:%s", p->name,
+                                   cc_button_held(s, p) ? "held" : "released");
+        } else {
+            g_string_append_printf(out, "%s:%s:%u", p->name,
+                                   extract32(s->led_on, p->pin, 1) ? "on" : "off",
+                                   s->led_changes[p->pin]);
+        }
+    }
+    return g_string_free(out, false);
+}
+
+static char *cc_get_buttons(Object *obj, Error **errp)
+{
+    return cc_summary(BCM_NS_CHIPCOMMON(obj), BCM_NS_PIN_BUTTON);
+}
+
+static char *cc_get_leds(Object *obj, Error **errp)
+{
+    return cc_summary(BCM_NS_CHIPCOMMON(obj), BCM_NS_PIN_LED);
+}
+
+void bcm_ns_cc_set_pins(BCMNSChipCommonState *s, const BCMNSGpioPin *pins)
+{
+    Object *obj = OBJECT(s);
+
+    assert(!s->pins);
+    s->pins = pins;
+    for (const BCMNSGpioPin *p = pins; p->name; p++) {
+        g_autofree char *prop = g_strdup_printf("%s-%s",
+            p->kind == BCM_NS_PIN_BUTTON ? "button" : "led", p->name);
+
+        assert(p->pin < BCM_NS_CC_NGPIO);
+        object_property_add(obj, prop, "bool",
+                            p->kind == BCM_NS_PIN_BUTTON ? cc_get_button : cc_get_led,
+                            p->kind == BCM_NS_PIN_BUTTON ? cc_set_button : NULL,
+                            NULL, (void *)p);
+    }
+    object_property_add_str(obj, "buttons", cc_get_buttons, NULL);
+    object_property_add_str(obj, "leds", cc_get_leds, NULL);
 }
 
 static void cc_realize(DeviceState *dev, Error **errp)
@@ -266,6 +445,11 @@ static void cc_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(obj), cc_uart_irq, "uart-irq", 2);
     qdev_init_gpio_in_named(DEVICE(obj), cc_gpio_set, "gpio-in", BCM_NS_CC_NGPIO);
     qdev_init_gpio_out_named(DEVICE(obj), s->gpio_out, "gpio-out", BCM_NS_CC_NGPIO);
+    for (uintptr_t n = 0; n < BCM_NS_CC_NGPIO; n++) {
+        g_autofree char *prop = g_strdup_printf("gpio%u", (unsigned)n);
+
+        object_property_add(obj, prop, "str", cc_get_gpio, cc_set_gpio, NULL, (void *)n);
+    }
 }
 
 static const Property cc_properties[] = {
@@ -280,10 +464,19 @@ static const Property cc_properties[] = {
     DEFINE_PROP_UINT32("watchdog-hz", BCMNSChipCommonState, wdt_hz, 125000000),
 };
 
+static int cc_post_load(void *opaque, int version_id)
+{
+    BCMNSChipCommonState *s = opaque;
+
+    s->led_on = cc_leds_lit(s);         /* derived; the change counts restart */
+    return 0;
+}
+
 static const VMStateDescription vmstate_cc = {
     .name = TYPE_BCM_NS_CHIPCOMMON,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = cc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(corecontrol, BCMNSChipCommonState),
         VMSTATE_UINT32(intstatus, BCMNSChipCommonState),
