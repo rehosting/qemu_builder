@@ -40,6 +40,13 @@
  *                      there, so SPSR is read from the frame instead.
  *   frame_psr=<off>    offset of the saved CPSR in the frame (S_PSR, 64),
  *                      for abi=oabi
+ *   rearm=<va>         load the module again after each guest reset. The va
+ *                      is an instruction only a boot runs, such as the
+ *                      kernel's entry with the MMU off (0x8000 for a 32-bit
+ *                      ARM zImage or Image at the usual offset). Once the
+ *                      module is in, only that instruction stays
+ *                      instrumented; when it runs again the plugin arms
+ *                      itself for the new boot's first syscall.
  *
  * AArch64 works the same way, with these differences:
  *   - hook= is an instruction where a register holds the pt_regs pointer of
@@ -101,7 +108,9 @@ static GMutex lock;
 static uint64_t hook_va;
 static uint32_t off_pc = 60, off_r0 = 0, off_orig_r0 = 68, off_psr = 64;
 static bool oabi;
-static unsigned long skip;
+static unsigned long skip, skip0;
+static uint64_t rearm_va;
+static bool watching;           /* loaded: only rearm_va is instrumented */
 static char *ko_path, *params = "";
 static GByteArray *ko;
 
@@ -179,8 +188,42 @@ static void inject(uint32_t frame, uint32_t nr, const uint32_t *a, int n)
     wr_mem32(frame + off_pc, swi_pc);
 }
 
+static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *u);
+
 static void all_done(void *u)
 {
+}
+
+/* After a reset of the plugin's callbacks: watch for the next boot. */
+static void watch(void *u)
+{
+    watching = true;
+    qemu_plugin_register_vcpu_tb_trans_cb(plugin_id, vcpu_tb_trans, NULL);
+}
+
+static void rearm(void *u)
+{
+    watching = false;
+    qemu_plugin_register_vcpu_tb_trans_cb(plugin_id, vcpu_tb_trans, NULL);
+}
+
+static void loaded(void)
+{
+    step = DONE;
+    qemu_plugin_reset(plugin_id, rearm_va ? watch : all_done, NULL);
+}
+
+static void on_entry(unsigned int vcpu, void *u)
+{
+    g_mutex_lock(&lock);
+    if (watching && step == DONE) {
+        logf_("guest boot at 0x%" PRIx64 "; armed again", rearm_va);
+        step = ARMED;
+        skip = skip0;
+        watching = false;       /* once, until the reset below completes */
+        qemu_plugin_reset(plugin_id, rearm, NULL);
+    }
+    g_mutex_unlock(&lock);
 }
 
 static void on_swi(unsigned int vcpu, void *u)
@@ -277,8 +320,7 @@ static void on_swi(unsigned int vcpu, void *u)
             wr(0, orig_r0);
             wr_mem32(frame + off_r0, orig_r0);
             wr_mem32(frame + off_orig_r0, orig_r0);
-            step = DONE;
-            qemu_plugin_reset(plugin_id, all_done, NULL);
+            loaded();
         }
         break;
     }
@@ -446,8 +488,7 @@ static void on_svc64(unsigned int vcpu, void *u)
             for (int i = 0; i < 9; i++) {
                 a64_set(frame, i, a64_saved[i]);
             }
-            step = DONE;
-            qemu_plugin_reset(plugin_id, all_done, NULL);
+            loaded();
         }
         break;
     }
@@ -462,7 +503,14 @@ static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *u)
     size_t n = qemu_plugin_tb_n_insns(tb);
     for (size_t i = 0; i < n; i++) {
         struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
-        if (qemu_plugin_insn_vaddr(insn) == hook_va) {
+        uint64_t va = qemu_plugin_insn_vaddr(insn);
+        if (watching) {
+            if (va == rearm_va) {
+                qemu_plugin_register_vcpu_insn_exec_cb(insn, on_entry,
+                                                       QEMU_PLUGIN_CB_NO_REGS,
+                                                       NULL);
+            }
+        } else if (va == hook_va) {
             qemu_plugin_register_vcpu_insn_exec_cb(insn, a64 ? on_svc64 : on_swi,
                                                    QEMU_PLUGIN_CB_RW_REGS,
                                                    NULL);
@@ -547,7 +595,9 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
                 return -1;
             }
         } else if (!strcmp(kv[0], "skip")) {
-            skip = g_ascii_strtoull(kv[1], NULL, 0);
+            skip = skip0 = g_ascii_strtoull(kv[1], NULL, 0);
+        } else if (!strcmp(kv[0], "rearm")) {
+            rearm_va = g_ascii_strtoull(kv[1], NULL, 0);
         } else {
             fprintf(stderr, "kmodinject: unknown argument '%s'\n", kv[0]);
             return -1;
