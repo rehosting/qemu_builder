@@ -39,6 +39,7 @@
 #include "hw/misc/bcm_ns.h"
 #include "hw/net/bcm_ns_eth.h"
 #include "hw/net/rtl8365mb.h"
+#include "hw/usb/bcm_ns_usb.h"
 #include "net/net.h"
 #include "system/system.h"
 #include "system/blockdev.h"
@@ -238,6 +239,13 @@ static const NSCore ns_cores[] = {
 #define NS_GMAC_WRAP  0x18110000  /* their IDM wrappers */
 #define NS_SPI_GMAC   147         /* IRQ 179-182: si_bus_irq_map in bcm5301x_pcie.c */
 #define NS_SRAB_BASE  0x18007000  /* BCM53012 switch register access bridge */
+#define NS_CCB_MII_BASE 0x18003000  /* ChipCommon-B MII management (USB3 PHY) */
+#define NS_EHCI_BASE  0x18021000  /* USB 2.0 core: EHCI, then its OHCI companion */
+#define NS_OHCI_BASE  0x18022000
+#define NS_XHCI_BASE  0x18023000  /* USB 3.0 core */
+#define NS_USB2_WRAP  0x18115000
+#define NS_SPI_USB2   79          /* IRQ 111: ehci_hcd + ohci_hcd on the unit */
+#define NS_SPI_USB3   80          /* IRQ 112: xhci_hcd */
 
 static size_t ns_build_erom(uint32_t *e)
 {
@@ -275,10 +283,17 @@ static BCMNSRegInit ns_dmu_init[] = {
      * [assume] exact words; the kernel only derives clock rates from them. */
     { 0x144, 0x00000000, 0 },            /* ctrl1: all channels enabled */
     { 0x154, 0x05000000, 0 },            /* ctrl5: ndiv_int 80 */
-    { 0x158, 0x01080d42, 0 },            /* ctrl6: pdiv 1, mdiv ch0/1/2 */
+    { 0x158, 0x01080c32, 0 },            /* ctrl6: pdiv 1, mdiv ch0/1/2 (a unit's) */
     { 0x15c, 0x00040810, 0 },            /* ctrl7: mdiv ch3/4/5 */
-    { 0x160, 0x00001000, 0x00001000 },   /* status: locked */
-    { 0x2a0, 0x00000010, 0 },            /* straps: bit4 = USB3 (not 3rd PCIe) */
+    { 0x160, 0x00001102, 0x00001000 },   /* status: locked (a unit's word) */
+    /* USB2 PLL control, a unit's word. The kernel's usb20_phy_init rewrites
+     * ndiv (bits 11:2) as 1920 MHz / GENPLL ch2 (25 MHz * 80 / 50 = 40 MHz),
+     * 48, which is what the unit holds. */
+    { 0x164, 0x00dd10c3, 0 },
+    { 0x184, 0x0000003b, 0 },            /* CRU reset: bits 4:3 USB/PCIe PHY (a unit's) */
+    /* straps, a unit's word: bit 4 = USB3 (not a 3rd PCIe), the only bit the
+     * kernel tests */
+    { 0x2a0, 0x00053630, 0 },
     /* PVTMON status, read-only. The kernel reports 418 - 5556 * value / 10000
      * degC (/proc/dmu/temperature, shown in the web UI); 0 would read as 418
      * degC. A unit read 0x24a-0x24d (93-91 degC) over 10 s at idle; 0x24c is
@@ -719,6 +734,27 @@ static void ns_init(MachineState *machine, const NSVariant *v)
         rtl8365mb_connect_uplink(RTL8365MB(rtl), ns_rtl_to_robo, sw);
         bcm53012_connect_mac(BCM53012(sw), 5, ns_robo_to_rtl, rtl);
     }
+
+    /*
+     * USB. The USB3 PHY sits on the ChipCommon-B MII management bus; the
+     * kernel's usb30_phy_init writes its PLL and PIPE settings there, waiting
+     * on the busy bit (8) between writes. Only the bus registers are
+     * modelled: control reads back (0x9a on the unit), busy reads 0, the
+     * command word is write-only (reads 0 on the unit after the PHY writes).
+     */
+    {
+        static const BCMNSRegInit ccb_mii_init[] = {
+            { 0x000, 0x00000000, 0x00000100 },   /* mgmt control; busy RO 0 */
+            { 0x004, 0x00000000, 0xffffffff },   /* command/data */
+            { UINT32_MAX, 0, 0 },
+        };
+
+        bcm_ns_regfile_create("ns.ccb-mii", NS_CCB_MII_BASE, ccb_mii_init);
+    }
+    bcm_ns_idm_set_iostatus(BCM_NS_IDM(idm), NS_USB2_WRAP, 0x44);   /* a unit's */
+    bcm_ns_usb2_create(NS_EHCI_BASE, NS_OHCI_BASE,
+                       qdev_get_gpio_in(mpcore, NS_SPI_USB2));
+    bcm_ns_usb3_create(NS_XHCI_BASE, qdev_get_gpio_in(mpcore, NS_SPI_USB3));
 
     /* EROM */
     erom_words = ns_build_erom(erom);

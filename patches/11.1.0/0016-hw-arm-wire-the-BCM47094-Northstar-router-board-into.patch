@@ -8,28 +8,31 @@ Adds CONFIG_BCM4709 (default y, TCG+ARM) and compiles the board and its
 devices: src/hw/arm/bcm4709.c (machine "bcm47094-router"),
 src/hw/misc/bcm_ns.c (ChipCommon, IDM wrappers, EROM, DMU/CRU),
 src/hw/block/bcm_ns_nand.c (NAND controller), src/hw/net/bcm_ns_eth.c
-(GMAC + BCM53012 switch) and src/hw/net/rtl8365mb.c (external switch on
-bit-banged SMI). Like the penguin.c wiring in patch 0001, those files are
-vendored authored sources; this patch only references them from the
-upstream Kconfig and meson.build files.
+(GMAC + BCM53012 switch), src/hw/net/rtl8365mb.c (external switch on
+bit-banged SMI) and src/hw/usb/bcm_ns_usb.c (the SoC's EHCI, OHCI and
+xHCI, built on QEMU's sysbus controllers, which the board selects). Like
+the penguin.c wiring in patch 0001, those files are vendored authored
+sources; this patch only references them from the upstream Kconfig and
+meson.build files.
 
 The board runs an unmodified 2.6.36 vendor kernel and its stock userspace
 from a NAND image. It depends on the a9mpcore periphclk-frequency,
 arm_l2x0 aux-ctrl and serial tx-pacing properties added earlier in the
 series.
 ---
- hw/arm/Kconfig       | 9 +++++++++
- hw/arm/meson.build   | 1 +
- hw/block/meson.build | 2 ++
- hw/misc/meson.build  | 2 ++
- hw/net/meson.build   | 1 +
- 5 files changed, 15 insertions(+)
+ hw/arm/Kconfig       | 13 +++++++++++++
+ hw/arm/meson.build   |  1 +
+ hw/block/meson.build |  2 ++
+ hw/misc/meson.build  |  2 ++
+ hw/net/meson.build   |  1 +
+ hw/usb/meson.build   |  2 ++
+ 6 files changed, 21 insertions(+)
 
 diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
-index 82e0bc2e7004384f98c407122c285fa43ab410f4..77e1cd45a1f2c7feb7886ee9458821fda7e22672 100644
+index 82e0bc2e7004384f98c407122c285fa43ab410f4..6f9e25df9d5d3732d1428cc8ea45c261810ee15d 100644
 --- a/hw/arm/Kconfig
 +++ b/hw/arm/Kconfig
-@@ -243,6 +243,15 @@ config SX1
+@@ -243,6 +243,19 @@ config SX1
      depends on TCG && ARM
      select OMAP
  
@@ -41,6 +44,10 @@ index 82e0bc2e7004384f98c407122c285fa43ab410f4..77e1cd45a1f2c7feb7886ee9458821fd
 +    select PL310
 +    select SERIAL_MM
 +    select UNIMP
++    select OR_IRQ
++    select USB_EHCI_SYSBUS
++    select USB_OHCI_SYSBUS
++    select USB_XHCI_SYSBUS
 +
  config VERSATILE
      bool
@@ -86,3 +93,14 @@ index 84f142df222afd6ac16c1e86ccdb05a222a4b65c..792bdad2efec3a625b2ff0461f6a4280
  
  subdir('can')
 +system_ss.add(when: 'CONFIG_BCM4709', if_true: files('bcm_ns_eth.c', 'rtl8365mb.c'))
+diff --git a/hw/usb/meson.build b/hw/usb/meson.build
+index ba55c28ef69e18215f99b8e3bb71025efbf01376..0ec5f5c5e6bc0e1d5a7afb4ff916af3b4e11cc6f 100644
+--- a/hw/usb/meson.build
++++ b/hw/usb/meson.build
+@@ -90,4 +90,6 @@ endif
+ 
+ system_ss.add(when: ['CONFIG_USB', 'CONFIG_XEN_BUS', libusb], if_true: files('xen-usb.c'))
+ 
++system_ss.add(when: 'CONFIG_BCM4709', if_true: files('bcm_ns_usb.c'))
++
+ modules += { 'hw-usb': hw_usb_modules }
