@@ -53,6 +53,7 @@
 #define GMAC_DEV_STATUS     0x004
 #define GMAC_INT_STATUS     0x020
 #define GMAC_INT_MASK       0x024
+#define GMAC_FIFO_DATA      0x128
 #define GMAC_DMA_BASE       0x200
 #define GMAC_DMA_END        0x300
 #define GMAC_MIB_BASE       0x300
@@ -374,6 +375,7 @@ static void gmac_reset(DeviceState *dev)
     for (size_t i = 0; i < ARRAY_SIZE(gmac_reset_regs); i++) {
         s->regs[gmac_reset_regs[i][0] / 4] = gmac_reset_regs[i][1];
     }
+    s->regs[GMAC_FIFO_DATA / 4] = s->fifo_data;
     memset(s->tx_cd, 0, sizeof(s->tx_cd));
     s->rx_cd = 0;
 }
@@ -400,10 +402,24 @@ static const VMStateDescription vmstate_gmac = {
     },
 };
 
+/*
+ * +0x128 differs per core on a unit and is not a reset value: the cores the
+ * firmware leaves idle read a fixed word each (0x19e, 0x3c, 0x32b), and the
+ * one carrying the LAN traffic (GMAC2) read 0x1597, then 0x17b8 seconds later.
+ * [assume] it is the FIFO access data window after 0x120/0x124 (address and
+ * byte select), so it shows FIFO RAM contents. et.ko never touches 0x120-0x128;
+ * only a register dump sees it. The board sets each core's word; it does not
+ * move with traffic here.
+ */
+static const Property gmac_properties[] = {
+    DEFINE_PROP_UINT32("fifo-data", BCMNSGmacState, fifo_data, 0),
+};
+
 static void gmac_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
+    device_class_set_props(dc, gmac_properties);
     dc->vmsd = &vmstate_gmac;
     device_class_set_legacy_reset(dc, gmac_reset);
 }

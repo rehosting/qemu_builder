@@ -24,6 +24,7 @@
 #include "qemu/error-report.h"
 #include "qemu/log.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/machines-qom.h"
 #include "hw/core/boards.h"
@@ -106,23 +107,26 @@ typedef struct NSVariant {
     bool rtl8365mb;     /* second switch on BCM53012 port 5, else GMAC0 there */
     uint32_t gpio_pads; /* level of each undriven GPIO pad (board wiring) */
     uint32_t gmac_iostatus[4];  /* GMAC0-3 IDM iostatus */
+    uint32_t gmac_fifo_data[4]; /* GMAC0-3 +0x128 */
 } NSVariant;
 
 /*
  * BCM47094 (4709C0): chip 53030, pkg 0 (4709), 512 MiB. The GPIO pad levels
  * and GMAC iostatus words are a unit's (stock firmware, buttons released;
  * gpioin 0x001F0EF4 with outen 0x002B0228). iostatus bit 12 is SISF_DMA64,
- * the only bit the vendor code tests.
+ * the only bit the vendor code tests. GMAC +0x128 is what each core reads on
+ * the unit (see bcm_ns_eth.c, "fifo-data").
  */
 static const NSVariant ns_bcm47094 = {
     "bcm47094-router", NS_CC_CHIPID(53030u, 0u, 0u), 512 * MiB, true,
     0x001f0ef4, { 0x0001f000, 0x0001b001, 0x00003001, 0x0001b000 },
+    { 0x0000019e, 0x0000003c, 0x00001597, 0x0000032b },
 };
 /* BCM4708: chip 53010, pkg 2 (BCM4708_PKG_ID), rev 0 [assume], 256 MiB;
- * [assume] pads pulled up, iostatus DMA64 only. */
+ * [assume] pads pulled up, iostatus DMA64 only, GMAC +0x128 reads 0. */
 static const NSVariant ns_bcm4708 = {
     "bcm4708-router", NS_CC_CHIPID(53010u, 2u, 0u), 256 * MiB, false,
-    0x00ffffff, { 0x1000, 0x1000, 0x1000, 0x1000 },
+    0x00ffffff, { 0x1000, 0x1000, 0x1000, 0x1000 }, { 0, 0, 0, 0 },
 };
 /*
  * ChipCommon state as CFE leaves it, read on a BCM47094 unit:
@@ -241,7 +245,9 @@ static size_t ns_build_erom(uint32_t *e)
 }
 
 /* ---- DMU / CRU at 0x1800c000 ([assume] values where noted) -------------- */
-static const BCMNSRegInit ns_dmu_init[] = {
+#define NS_DMU_PVTMON_STATUS 0x2c8
+/* Not const: the "temperature" machine property rewrites the PVTMON entry. */
+static BCMNSRegInit ns_dmu_init[] = {
     /* GENPLL: ndiv 80, pdiv 1, ch5 mdiv 16 -> ALP / iproc_slow 125 MHz.
      * [assume] exact words; the kernel only derives clock rates from them. */
     { 0x144, 0x00000000, 0 },            /* ctrl1: all channels enabled */
@@ -250,10 +256,11 @@ static const BCMNSRegInit ns_dmu_init[] = {
     { 0x15c, 0x00040810, 0 },            /* ctrl7: mdiv ch3/4/5 */
     { 0x160, 0x00001000, 0x00001000 },   /* status: locked */
     { 0x2a0, 0x00000010, 0 },            /* straps: bit4 = USB3 (not 3rd PCIe) */
-    /* PVTMON status, read-only. The kernel reports 418 - 0.5556 * value degC
-     * (/proc/dmu/temperature, shown in the web UI); 0 would read as 418 degC.
-     * 0x284 is about 60 degC, a plausible idle SoC. [assume] the value. */
-    { 0x2c8, 0x00000284, 0xffffffff },
+    /* PVTMON status, read-only. The kernel reports 418 - 5556 * value / 10000
+     * degC (/proc/dmu/temperature, shown in the web UI); 0 would read as 418
+     * degC. A unit read 0x24a-0x24d (93-91 degC) over 10 s at idle; 0x24c is
+     * 92 degC. Machine property "temperature" (degC) overrides it. */
+    { NS_DMU_PVTMON_STATUS, 0x0000024c, 0xffffffff },
     { UINT32_MAX, 0, 0 },
 };
 
@@ -270,6 +277,49 @@ static const BCMNSRegInit ns_ihost_init[] = {
     { 0xec0, 0x00007000, 0 },            /* POLICY_DBG: active fid 7 */
     { UINT32_MAX, 0, 0 },
 };
+
+static BCMNSRegFileState *ns_dmu;
+
+static BCMNSRegInit *ns_dmu_pvtmon(void)
+{
+    BCMNSRegInit *r = ns_dmu_init;
+
+    while (r->offset != NS_DMU_PVTMON_STATUS) {
+        r++;
+    }
+    return r;
+}
+
+/* "temperature": what the vendor kernel reports, in degC. Settable at start
+ * (-M ...,temperature=N) or at run time (qom-set /machine temperature N). */
+static void ns_get_temperature(Object *obj, Visitor *v, const char *name,
+                               void *opaque, Error **errp)
+{
+    int64_t t = 418 - (5556 * (int64_t)ns_dmu_pvtmon()->value) / 10000;
+
+    visit_type_int(v, name, &t, errp);
+}
+
+static void ns_set_temperature(Object *obj, Visitor *v, const char *name,
+                               void *opaque, Error **errp)
+{
+    int64_t t;
+    uint32_t raw;
+
+    if (!visit_type_int(v, name, &t, errp)) {
+        return;
+    }
+    if (t < -40 || t > 125) {
+        error_setg(errp, "temperature %" PRId64 " degC is outside -40..125", t);
+        return;
+    }
+    /* Smallest status word the kernel's integer formula maps back to t. */
+    raw = ((418 - t) * 10000 + 5555) / 5556;
+    ns_dmu_pvtmon()->value = raw;
+    if (ns_dmu) {
+        ns_dmu->regs[NS_DMU_PVTMON_STATUS / 4] = raw;
+    }
+}
 
 typedef struct {
     ARMCPU *cpu[2];
@@ -599,6 +649,7 @@ static void ns_init(MachineState *machine, const NSVariant *v)
 
         for (n = 0; n < 4; n++) {
             gmac[n] = qdev_new(TYPE_BCM_NS_GMAC);
+            qdev_prop_set_uint32(gmac[n], "fifo-data", v->gmac_fifo_data[n]);
             sysbus_realize_and_unref(SYS_BUS_DEVICE(gmac[n]), &error_fatal);
             sysbus_mmio_map(SYS_BUS_DEVICE(gmac[n]), 0, NS_GMAC_BASE + n * 0x1000);
             sysbus_connect_irq(SYS_BUS_DEVICE(gmac[n]), 0,
@@ -647,7 +698,7 @@ static void ns_init(MachineState *machine, const NSVariant *v)
     memory_region_add_subregion(sysmem, NS_EROM_BASE, &s->erom);
     rom_add_blob_fixed("ns.erom", erom, erom_words * sizeof(uint32_t), NS_EROM_BASE);
 
-    bcm_ns_regfile_create("ns.dmu", NS_DMU_BASE, ns_dmu_init);
+    ns_dmu = bcm_ns_regfile_create("ns.dmu", NS_DMU_BASE, ns_dmu_init);
     bcm_ns_regfile_create("ns.ihost-cru", NS_IHOST_BASE, ns_ihost_init);
 
     /*
@@ -690,6 +741,10 @@ static void ns_machine_common(MachineClass *mc, const NSVariant *v)
     mc->default_cpus = 2;
     mc->default_ram_size = v->ram_size;
     mc->default_ram_id = "ns.dram";
+    object_class_property_add(OBJECT_CLASS(mc), "temperature", "int",
+                              ns_get_temperature, ns_set_temperature, NULL, NULL);
+    object_class_property_set_description(OBJECT_CLASS(mc), "temperature",
+        "SoC temperature the PVTMON reports, in degC (default: a unit's 92)");
 }
 
 static void ns_machine_init(MachineClass *mc)

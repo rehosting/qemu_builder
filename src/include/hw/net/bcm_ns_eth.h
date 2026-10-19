@@ -32,6 +32,7 @@ struct BCMNSGmacState {
     uint32_t tx_cd[BCM_NS_GMAC_NTX];   /* dma64 current descriptor (byte offset) */
     uint32_t rx_cd;
     uint32_t rx_dropped;
+    uint32_t fifo_data;                /* "fifo-data": +0x128 reset value */
     uint8_t txbuf[BCM_NS_GMAC_FRAME];
 };
 
