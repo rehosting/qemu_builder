@@ -15,6 +15,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(RTL8365MBState, RTL8365MB)
 
 #define RTL8365MB_NUTP   4             /* UTP ports that can carry a QEMU netdev */
 #define RTL8365MB_NPHY   5             /* PHYs the driver initialises */
+#define RTL8365MB_EXT1   6             /* physical port of EXT1, the RGMII uplink */
+#define RTL8365MB_LUT_SIZE 512         /* learned-address table (model size) */
 
 typedef void RTL8365MBUplinkFn(void *opaque, const uint8_t *buf, size_t len);
 
@@ -42,6 +44,15 @@ struct RTL8365MBState {
 
     uint16_t regs[0x10000];
     uint16_t ocp[RTL8365MB_NPHY][0x10000 / 2];
+
+    /* learned addresses: mac -> physical port; soft state, rebuilt by traffic */
+    struct {
+        uint8_t mac[6];
+        uint8_t port;
+        uint8_t valid;
+        int64_t seen;                  /* QEMU_CLOCK_VIRTUAL ns */
+    } lut[RTL8365MB_LUT_SIZE];
+    bool vlan_warned;
 };
 
 void rtl8365mb_connect_uplink(RTL8365MBState *s, RTL8365MBUplinkFn *fn, void *opaque);

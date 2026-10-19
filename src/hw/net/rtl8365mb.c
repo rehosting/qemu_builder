@@ -8,8 +8,19 @@
  * so the slave latches SDA on SCK rising and changes its own SDA only on SCK falling.
  * Frame formats and register behaviour: ETH-CONTRACT.md section 6.
  *
- * Forwarding is a flood among linked ports; the RTL VLAN and lookup tables are stored
- * but not applied.
+ * Forwarding is what the chip does with its tables at their reset values, because
+ * the vendor driver never programs them: its ioctls and init (rtk_switch_init,
+ * initialize_switch) call no VLAN, port-isolation or lookup-table setter, and rc on
+ * this board has no path that does (its RTL VLAN commands are built for other models;
+ * a VLAN for this board's guest networks is tagged on the host switch's port 5 and
+ * crosses this one unchanged). So:
+ * - source addresses are learned (one table, VLAN-unaware) and age out after 300 s;
+ *   a known unicast goes to its port, anything else floods;
+ * - each port may only send to the ports in its isolation mask (0x08a2 + port, 11
+ *   ports), which resets to all ports;
+ * - frames pass with their tags unchanged. Turning on VLAN filtering (0x07a8 bit 0)
+ *   is logged as unimplemented; forwarding stays VLAN-unaware.
+ * A write of 0x0a39 bit 0 flushes the learned table.
  */
 #include "qemu/osdep.h"
 #include "qemu/log.h"
@@ -19,6 +30,7 @@
 #include "hw/core/qdev-properties-system.h"
 #include "hw/net/rtl8365mb.h"
 #include "migration/vmstate.h"
+#include "qemu/timer.h"
 
 #define SMI_CMD_WRITE       0xb8
 #define SMI_CMD_READ        0xb9
@@ -40,6 +52,13 @@ enum {
 #define REG_IND_WDATA       0x1f03
 #define REG_IND_RDATA       0x1f04
 #define REG_GPHY_OCP_MSB    0x1d15
+#define REG_VLAN_CTRL       0x07a8  /* bit 0: VLAN filtering */
+#define REG_PORT_ISO(p)     (0x08a2 + (p))  /* egress ports permitted from port p */
+#define REG_LUT_FLUSH       0x0a39  /* bit 0: flush every learned address */
+
+#define NPHYS               11      /* physical ports, as the isolation masks count */
+#define ISO_ALL             0x07ff
+#define LUT_AGE_NS          (300 * NANOSECONDS_PER_SECOND)
 
 #define CHIP_ID_RTL8367C    0x6367
 #define EXT_FORCE_LINK      0x1010  /* force + link */
@@ -114,6 +133,11 @@ static void ind_access(RTL8365MBState *s, uint16_t ctrl)
     }
 }
 
+static void lut_flush(RTL8365MBState *s)
+{
+    memset(s->lut, 0, sizeof(s->lut));
+}
+
 static uint16_t reg_read(RTL8365MBState *s, uint16_t addr)
 {
     switch (addr) {
@@ -137,6 +161,19 @@ static void reg_write(RTL8365MBState *s, uint16_t addr, uint16_t v)
             ind_access(s, v);
         }
         v &= ~1;
+        break;
+    case REG_LUT_FLUSH:
+        if (v & 1) {
+            lut_flush(s);
+        }
+        v &= ~1;                        /* done at once */
+        break;
+    case REG_VLAN_CTRL:
+        if ((v & 1) && !s->vlan_warned) {
+            qemu_log_mask(LOG_UNIMP, "rtl8365mb: VLAN filtering enabled; "
+                          "forwarding stays VLAN-unaware\n");
+            s->vlan_warned = true;
+        }
         break;
     }
     s->regs[addr] = v;
@@ -291,6 +328,16 @@ static void smi_sda(void *opaque, int n, int level)
     smi_drive(s, 1);
 }
 
+/* Forwarding tables at their reset values */
+static void rtl_table_defaults(RTL8365MBState *s)
+{
+    for (int p = 0; p < NPHYS; p++) {
+        s->regs[REG_PORT_ISO(p)] = ISO_ALL;
+    }
+    lut_flush(s);
+    s->vlan_warned = false;
+}
+
 static void rtl_regs_reset(RTL8365MBState *s)
 {
     memset(s->regs, 0, sizeof(s->regs));
@@ -298,6 +345,7 @@ static void rtl_regs_reset(RTL8365MBState *s)
     for (int p = 0; p < RTL8365MB_NPHY; p++) {
         s->ocp[p][OCP_BMCR >> 1] = 0x1140;      /* AN enable, 1000 FD */
     }
+    rtl_table_defaults(s);
     s->phase = SMI_IDLE;
 }
 
@@ -333,22 +381,82 @@ static void rtl_send(RTL8365MBState *s, int p, const uint8_t *buf, size_t len)
     }
 }
 
+static unsigned lut_slot(const uint8_t *mac)
+{
+    uint32_t h = 0;
+
+    for (int i = 0; i < 6; i++) {
+        h = h * 31 + mac[i];
+    }
+    return h % RTL8365MB_LUT_SIZE;
+}
+
+static void lut_learn(RTL8365MBState *s, const uint8_t *mac, int port, int64_t now)
+{
+    unsigned i = lut_slot(mac);
+
+    if (!(mac[0] & 1)) {
+        memcpy(s->lut[i].mac, mac, 6);
+        s->lut[i].port = port;
+        s->lut[i].valid = 1;
+        s->lut[i].seen = now;
+    }
+}
+
+/* Physical port a unicast address was learned on, or -1 to flood */
+static int lut_lookup(RTL8365MBState *s, const uint8_t *mac, int64_t now)
+{
+    unsigned i = lut_slot(mac);
+
+    if (mac[0] & 1 || !s->lut[i].valid || memcmp(s->lut[i].mac, mac, 6)) {
+        return -1;
+    }
+    if (now - s->lut[i].seen > LUT_AGE_NS) {
+        s->lut[i].valid = 0;
+        return -1;
+    }
+    return s->lut[i].port;
+}
+
+static bool port_up(RTL8365MBState *s, int phys)
+{
+    return phys == RTL8365MB_EXT1 ? ext_link(s) : utp_link(s, phys);
+}
+
+static void rtl_egress(RTL8365MBState *s, int phys, const uint8_t *buf, size_t len)
+{
+    rtl_send(s, phys == RTL8365MB_EXT1 ? -1 : phys, buf, len);
+}
+
+/* src and every port are physical: UTP 0-3, or RTL8365MB_EXT1 */
 static void rtl_forward(RTL8365MBState *s, int src, const uint8_t *buf, size_t len)
 {
-    for (int p = 0; p < RTL8365MB_NUTP; p++) {
-        if (p != src && utp_link(s, p)) {
-            rtl_send(s, p, buf, len);
+    static const int ports[] = { 0, 1, 2, 3, RTL8365MB_EXT1 };
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint16_t allowed = s->regs[REG_PORT_ISO(src)];
+    int dst;
+
+    lut_learn(s, buf + 6, src, now);
+    dst = lut_lookup(s, buf, now);
+    if (dst >= 0 && port_up(s, dst)) {
+        if (dst != src && (allowed & (1 << dst))) {
+            rtl_egress(s, dst, buf, len);
         }
+        return;
     }
-    if (src >= 0 && ext_link(s)) {
-        rtl_send(s, -1, buf, len);
+    for (int i = 0; i < ARRAY_SIZE(ports); i++) {
+        int p = ports[i];
+
+        if (p != src && (allowed & (1 << p)) && port_up(s, p)) {
+            rtl_egress(s, p, buf, len);
+        }
     }
 }
 
 void rtl8365mb_from_uplink(RTL8365MBState *s, const uint8_t *buf, size_t len)
 {
     if (len >= 14 && ext_link(s)) {
-        rtl_forward(s, -1, buf, len);
+        rtl_forward(s, RTL8365MB_EXT1, buf, len);
     }
 }
 
@@ -397,6 +505,9 @@ static void rtl_realize(DeviceState *dev, Error **errp)
         pp->nic = qemu_new_nic(&rtl_net_info, &pp->conf, TYPE_RTL8365MB, id,
                                &dev->mem_reentrancy_guard, pp);
     }
+    /* The board creates this device without a bus, so its reset handler
+     * does not run at power-on; the forwarding tables must not start at 0. */
+    rtl_table_defaults(s);
 }
 
 static void rtl_reset(DeviceState *dev)
@@ -427,10 +538,17 @@ static const Property rtl_properties[] = {
     DEFINE_PROP_NETDEV("netdev-p3", RTL8365MBState, ext[3].conf.peers),
 };
 
+static int rtl_post_load(void *opaque, int version_id)
+{
+    lut_flush(opaque);                  /* not migrated: relearned from traffic */
+    return 0;
+}
+
 static const VMStateDescription vmstate_rtl = {
     .name = TYPE_RTL8365MB,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = rtl_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8(sck, RTL8365MBState),
         VMSTATE_UINT8(sda, RTL8365MBState),
