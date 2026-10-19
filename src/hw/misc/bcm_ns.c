@@ -231,7 +231,7 @@ static void cc_reset(DeviceState *dev)
     uint32_t wdreset = s->intstatus & CI_WDRESET;
 
     timer_del(s->wdt_timer);
-    s->corecontrol = 0;
+    s->corecontrol = s->corecontrol_reset;
     s->intstatus = wdreset;          /* "watchdog reset occurred" is sticky */
     s->intmask = 0;
     s->chipcontrol = 0;
@@ -241,7 +241,7 @@ static void cc_reset(DeviceState *dev)
     s->gpioevent = s->gpioeventintmask = s->gpioeventintpolarity = 0;
     s->gpiotimerval = s->gpiotimeroutmask = 0;
     s->watchdog = 0;
-    s->clkdiv = 0;
+    s->clkdiv = s->clkdiv_reset;
 }
 
 static void cc_realize(DeviceState *dev, Error **errp)
@@ -275,6 +275,8 @@ static const Property cc_properties[] = {
     DEFINE_PROP_UINT32("chipstatus", BCMNSChipCommonState, chipstatus, 0),
     DEFINE_PROP_UINT32("eromptr", BCMNSChipCommonState, eromptr, 0),
     DEFINE_PROP_UINT32("gpio-pullup-in", BCMNSChipCommonState, gpio_pullup_in, GPIO_MASK),
+    DEFINE_PROP_UINT32("corecontrol", BCMNSChipCommonState, corecontrol_reset, 0),
+    DEFINE_PROP_UINT32("clkdiv", BCMNSChipCommonState, clkdiv_reset, 0),
     DEFINE_PROP_UINT32("watchdog-hz", BCMNSChipCommonState, wdt_hz, 125000000),
 };
 

@@ -31,6 +31,8 @@ struct BCMNSChipCommonState {
     uint32_t chipstatus;
     uint32_t eromptr;
     uint32_t gpio_pullup_in;           /* level seen on undriven input pins */
+    uint32_t corecontrol_reset;        /* corecontrol/clkdiv as the boot loader */
+    uint32_t clkdiv_reset;             /* leaves them, restored on every reset */
     uint32_t wdt_hz;                   /* watchdog count rate (ALP clock) */
 
     /* state */

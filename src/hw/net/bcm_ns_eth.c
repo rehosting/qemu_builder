@@ -12,12 +12,22 @@
  *     frame at the control.RO offset (30 for eth units, 18 for forwarders).
  *   - INT_STATUS is W1C; the line is INT_STATUS & INT_MASK.
  *   - TX and RX complete synchronously. MIB counters read as zero.
+ *   - Reset values are an untouched core's on a unit (GMAC3, which the
+ *     firmware never brings up); the driver read-modify-writes several of
+ *     them. DEV_STATUS and UniMAC 0x844 are status words: [assume] they
+ *     take the brought-up value once DEV_CONTROL bit 4 is set, as it is on
+ *     the three cores et uses.
+ *   - Offsets in 0x000-0x1fc and 0x800-0x87c that a BCM47094 unit does not
+ *     decode (the same 116 on all four cores) abort the access, as on the
+ *     unit, where a devmem read of one takes a bus error.
  *
  * BCM53012 behind the SRAB at 0x18007000:
  *   - SRAB commands complete synchronously; the grant follows the request.
  *   - Switch registers are a store indexed by (page, reg). The vendor robo
  *     driver always addresses a register at its first byte with its width,
  *     so registers do not overlap.
+ *   - Reset values, the internal GPHYs' ID, BMSR and ANLPAR, and the
+ *     link/speed/duplex summaries are matched to a unit's registers.
  *   - The VLAN table (5395-style access at 05:80/81/83) and per-port PVIDs
  *     (34:10+2p) drive forwarding. Ports 0-4 can carry a QEMU netdev, port 7
  *     is GMAC1, port 8 (IMP) is GMAC2. No MAC learning: frames flood to the
@@ -47,7 +57,10 @@
 #define GMAC_DMA_END        0x300
 #define GMAC_MIB_BASE       0x300
 #define GMAC_MIB_END        0x430
+#define GMAC_DEV_CONTROL    0x000
 #define UMAC_CMD            0x808
+#define UMAC_STATUS         0x844
+#define DEVCTL_UP           (1u << 4)   /* set by et on every core it uses */
 
 #define INT_RX              (1u << 16)
 #define INT_TX(c)           (1u << (24 + (c)))
@@ -224,7 +237,10 @@ static uint64_t gmac_read(void *opaque, hwaddr addr, unsigned size)
         return 0;
     }
     if (addr == GMAC_DEV_STATUS) {
-        return 0;
+        return (s->regs[GMAC_DEV_CONTROL / 4] & DEVCTL_UP) ? 0x04131100 : 0x04130000;
+    }
+    if (addr == UMAC_STATUS) {
+        return (s->regs[GMAC_DEV_CONTROL / 4] & DEVCTL_UP) ? 0x0b : 0x1a;
     }
     return s->regs[addr / 4];
 }
@@ -277,6 +293,7 @@ static void gmac_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
         s->regs[addr / 4] &= ~val;
         break;
     case GMAC_DEV_STATUS:
+    case UMAC_STATUS:
         return;
     default:
         if (addr >= GMAC_MIB_BASE && addr < GMAC_MIB_END) {
@@ -293,11 +310,60 @@ static void gmac_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
     gmac_update_irq(s);
 }
 
+/* Words in 0x000-0x1fc and 0x800-0x87c with no register, from bus errors on a unit */
+static const uint32_t gmac_hole_lo[4] = { 0xfffff8f4, 0xffffffff, 0xfffff8f0, 0xfafffc82 };
+static const uint32_t gmac_hole_umac = 0x00417f81;
+
+static bool gmac_hole(hwaddr addr)
+{
+    unsigned w;
+
+    if (addr < GMAC_DMA_BASE) {
+        w = addr / 4;
+        return gmac_hole_lo[w / 32] & (1u << (w % 32));
+    }
+    if (addr >= 0x800 && addr < 0x880) {
+        return gmac_hole_umac & (1u << ((addr - 0x800) / 4));
+    }
+    return false;
+}
+
+static MemTxResult gmac_read_attrs(void *opaque, hwaddr addr, uint64_t *data,
+                                   unsigned size, MemTxAttrs attrs)
+{
+    if (gmac_hole(addr)) {
+        return MEMTX_ERROR;             /* SLVERR: the unit reports DFSR.ExT = 1 */
+    }
+    *data = gmac_read(opaque, addr, size);
+    return MEMTX_OK;
+}
+
+static MemTxResult gmac_write_attrs(void *opaque, hwaddr addr, uint64_t data,
+                                    unsigned size, MemTxAttrs attrs)
+{
+    if (gmac_hole(addr)) {
+        return MEMTX_ERROR;             /* SLVERR: the unit reports DFSR.ExT = 1 */
+    }
+    gmac_write(opaque, addr, data, size);
+    return MEMTX_OK;
+}
+
 static const MemoryRegionOps gmac_ops = {
-    .read = gmac_read,
-    .write = gmac_write,
+    .read_with_attrs = gmac_read_attrs,
+    .write_with_attrs = gmac_write_attrs,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/* Reset values as a unit's untouched GMAC3 reads them (offset, value) */
+static const uint32_t gmac_reset_regs[][2] = {
+    { 0x000, 0x00300003 }, { 0x104, 0x04cc0599 }, { 0x108, 0x0a0a0a0a },
+    { 0x10c, 0x00000404 }, { 0x188, 0x00100000 }, { 0x18c, 0x00000271 },
+    { 0x190, 0x06000001 }, { 0x804, 0x00000014 }, { 0x808, 0x010000db },
+    { 0x814, 0x000005ee }, { 0x818, 0x0000ffff }, { 0x848, 0x00018100 },
+    { 0x84c, 0x00018100 }, { 0x854, 0x00000007 }, { 0x860, 0x0000ffff },
+    { 0x864, 0x00000040 }, { 0x868, 0x00000022 }, { 0x86c, 0x0000003c },
+    { 0x870, 0x0000007d },
 };
 
 static void gmac_reset(DeviceState *dev)
@@ -305,6 +371,9 @@ static void gmac_reset(DeviceState *dev)
     BCMNSGmacState *s = BCM_NS_GMAC(dev);
 
     memset(s->regs, 0, sizeof(s->regs));
+    for (size_t i = 0; i < ARRAY_SIZE(gmac_reset_regs); i++) {
+        s->regs[gmac_reset_regs[i][0] / 4] = gmac_reset_regs[i][1];
+    }
     memset(s->tx_cd, 0, sizeof(s->tx_cd));
     s->rx_cd = 0;
 }
@@ -363,6 +432,14 @@ static void gmac_class_init(ObjectClass *klass, const void *data)
 #define VTA_READ            0x01
 #define BMCR_RESET          0x8000
 #define BMCR_PDOWN          0x0800
+#define BMCR_ANRESTART      0x0200
+#define BMCR_DEFAULT        0x1140      /* AN on, full duplex, 1000 */
+#define BMSR_BASE           0x79c9      /* abilities; | 0x24 when linked */
+#define GPHY_ID1            0x600d      /* reg 2/3 of every internal GPHY on a unit */
+#define GPHY_ID2            0x8720
+#define GPHY_ANAR           0x0de1
+#define GPHY_ANLPAR         0xdde1      /* a 1000FD peer with pause, as a unit read it */
+#define NOLINK_1000FD_PORT  6           /* reads 1000FD with no link on a unit */
 #define IMP_PORT            8
 #define BRCM_TAG_LEN        4
 
@@ -396,20 +473,36 @@ static uint64_t robo_read(BCM53012State *sw, int page, int reg)
     case R(0x02, 0x40):
         return 0;                               /* rev 0 (real HW: "BCM53012, rev 0") */
     case R(0x01, 0x00):                         /* link status, bit per port */
-    case R(0x01, 0x08):                         /* duplex: full on every linked port */
         for (p = 0; p < BCM53012_NPORTS; p++) {
             v |= (uint64_t)sw_link(sw, p) << p;
         }
         return v;
+    case R(0x01, 0x08):                         /* duplex: full on every linked port */
+        for (p = 0; p < BCM53012_NPORTS; p++) {
+            v |= (uint64_t)(sw_link(sw, p) || p == NOLINK_1000FD_PORT) << p;
+        }
+        return v;
     case R(0x01, 0x04):                         /* speed, 2 bits per port, 2 = 1000 */
         for (p = 0; p < BCM53012_NPORTS; p++) {
-            v |= (uint64_t)(sw_link(sw, p) ? 2 : 0) << (2 * p);
+            bool g = sw_link(sw, p) || p == NOLINK_1000FD_PORT;
+
+            v |= (uint64_t)(g ? 2 : 0) << (2 * p);
         }
         return v;
     }
-    if (page >= PAGE_GPHY(0) && page < PAGE_GPHY(BCM53012_NEXT) && reg == 0x02) {
-        /* BMSR: link + autoneg complete when a netdev is attached and up */
-        return 0x7949 | (sw_link(sw, page - PAGE_GPHY(0)) ? 0x0024 : 0);
+    if (page >= PAGE_GPHY(0) && page < PAGE_GPHY(BCM53012_NEXT)) {
+        bool link = sw_link(sw, page - PAGE_GPHY(0));
+
+        switch (reg) {
+        case 0x02:          /* BMSR: link + autoneg complete when a netdev is up */
+            return BMSR_BASE | (link ? 0x0024 : 0);
+        case 0x04:
+            return GPHY_ID1;
+        case 0x06:
+            return GPHY_ID2;
+        case 0x0a:          /* ANLPAR */
+            return link ? GPHY_ANLPAR : 0;
+        }
     }
     return sw->regs[R(page, reg)];
 }
@@ -437,7 +530,8 @@ static void robo_write(BCM53012State *sw, int page, int reg, uint64_t v)
         break;
     }
     if (page >= PAGE_GPHY(0) && page < PAGE_GPHY(BCM53012_NEXT) && reg == 0x00) {
-        v &= ~(uint64_t)BMCR_RESET;
+        /* reset and restart-autoneg self-clear; reset restores the default */
+        v = (v & BMCR_RESET) ? BMCR_DEFAULT : v & ~(uint64_t)BMCR_ANRESTART;
     }
     sw->regs[R(page, reg)] = v;
 }
@@ -737,6 +831,23 @@ static void sw_reset(DeviceState *dev)
 
     sw->cmdstat = sw->wd_h = sw->wd_l = sw->rd_h = sw->rd_l = sw->ctrls = 0;
     memset(sw->regs, 0, sizeof(sw->regs));
+    /*
+     * Reset values the vendor robo driver read-modify-writes, worked back from
+     * a unit's registers after boot: switch mode bit 2; IMP (0e) and port 5/7
+     * (5d/5f) overrides "default(2 << 2) SPEED" and "default(1 << 1)
+     * DUPLX_MODE" as bcmrobo.c says; 802.1Q control 0, 1 and 6.
+     */
+    sw->regs[R(0x00, 0x0b)] = 0x04;
+    sw->regs[R(0x00, 0x0e)] = 0x0a;
+    sw->regs[R(0x00, 0x5d)] = 0x0a;
+    sw->regs[R(0x00, 0x5f)] = 0x0a;
+    sw->regs[R(0x34, 0x00)] = 0x03;
+    sw->regs[R(0x34, 0x01)] = 0x02;
+    sw->regs[R(0x34, 0x06)] = 0x10;
+    for (int p = 0; p < BCM53012_NEXT; p++) {
+        sw->regs[R(PAGE_GPHY(p), 0x00)] = BMCR_DEFAULT;
+        sw->regs[R(PAGE_GPHY(p), 0x08)] = GPHY_ANAR;
+    }
     memset(sw->vtable, 0, sizeof(sw->vtable));
     memset(sw->arl, 0, sizeof(sw->arl));
 }

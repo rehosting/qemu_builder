@@ -86,8 +86,13 @@
 #define NS_PERIPH_HZ         (NS_ARM_HZ / 2)
 #define NS_ALP_HZ            125000000u  /* si_ns_alp_clock() from GENPLL below */
 
-/* ChipCommon-A identity: chip, rev, package, AI bus (bcmdevs.h). */
-#define NS_CC_CHIPID(chip, pkg, rev) ((1u << 28) | ((pkg) << 20) | ((rev) << 16) | (chip))
+/*
+ * ChipCommon-A identity (sbchipc.h CID_*): bus type NAI (3), core count 15,
+ * package, rev, chip. A BCM47094 unit reads 0x3F00CF26; siutils treats NAI
+ * like AI.
+ */
+#define NS_CC_CHIPID(chip, pkg, rev) \
+    ((3u << 28) | (15u << 24) | ((pkg) << 20) | ((rev) << 16) | (chip))
 
 /*
  * Northstar parts this board model runs. They differ, as far as their vendor
@@ -99,19 +104,36 @@ typedef struct NSVariant {
     uint32_t chipid;
     uint64_t ram_size;
     bool rtl8365mb;     /* second switch on BCM53012 port 5, else GMAC0 there */
+    uint32_t gpio_pads; /* level of each undriven GPIO pad (board wiring) */
+    uint32_t gmac_iostatus[4];  /* GMAC0-3 IDM iostatus */
 } NSVariant;
 
-/* BCM47094 (4709C0): chip 53030, pkg 0 (4709), 512 MiB */
+/*
+ * BCM47094 (4709C0): chip 53030, pkg 0 (4709), 512 MiB. The GPIO pad levels
+ * and GMAC iostatus words are a unit's (stock firmware, buttons released;
+ * gpioin 0x001F0EF4 with outen 0x002B0228). iostatus bit 12 is SISF_DMA64,
+ * the only bit the vendor code tests.
+ */
 static const NSVariant ns_bcm47094 = {
     "bcm47094-router", NS_CC_CHIPID(53030u, 0u, 0u), 512 * MiB, true,
+    0x001f0ef4, { 0x0001f000, 0x0001b001, 0x00003001, 0x0001b000 },
 };
-/* BCM4708: chip 53010, pkg 2 (BCM4708_PKG_ID), rev 0 [assume], 256 MiB */
+/* BCM4708: chip 53010, pkg 2 (BCM4708_PKG_ID), rev 0 [assume], 256 MiB;
+ * [assume] pads pulled up, iostatus DMA64 only. */
 static const NSVariant ns_bcm4708 = {
     "bcm4708-router", NS_CC_CHIPID(53010u, 2u, 0u), 256 * MiB, false,
+    0x00ffffff, { 0x1000, 0x1000, 0x1000, 0x1000 },
 };
-/* [assume] capabilities: 2 UARTs, UART clock = ALP (sel 0), no flash type
- * (mainline: "Flash type not supported"), no PMU, no SROM/OTP. */
-#define NS_CC_CAPS           0x00000002u
+/*
+ * ChipCommon state as CFE leaves it, read on a BCM47094 unit:
+ * capabilities = 2 UARTs, UARTs on the internal clock (UCLKSEL 1), OTP size 1,
+ * JTAG master; corecontrol = 0x39 (bit 0: UART clock override, so the CCA
+ * UARTs run at iproc_slow_clk, 125 MHz). The kernel prints "CCA UART Clock
+ * Config: Sel=1 Ovr=1 Div=48"; clkdiv's other fields are [assume] 0.
+ */
+#define NS_CC_CAPS           0x0048000au
+#define NS_CC_CORECONTROL    0x00000039u
+#define NS_CC_CLKDIV         0x00000030u
 
 /*
  * Boot ROM. The real mask ROM is not available; this models only what the
@@ -137,9 +159,12 @@ static const uint32_t ns_bootrom_pen[] = {
 
 /* ---- EROM ---------------------------------------------------------------
  * Core list, IDs and revisions are the ones bcma enumerates on real hardware
- * (an OpenWrt boot log). Register bases come from
- * the vendor platform code / mainline DTS. Wrapper addresses marked [assume]
- * are not in any source; the kernel only needs them self-consistent.
+ * (an OpenWrt boot log). Slave address ranges are a BCM47094 unit's, as its
+ * vendor kernel lists them in /proc/bus/pci/devices (ai_scan's coresba and
+ * coresba2 with their sizes); the BCM4708 variant [assume]s the same layout.
+ * GMAC wrapper addresses are confirmed by reads on the unit; the other
+ * wrappers marked [assume] are not in any source, and the kernel only needs
+ * them self-consistent.
  */
 typedef struct NSCore {
     const char *name;
@@ -148,27 +173,31 @@ typedef struct NSCore {
     uint32_t base;
     uint32_t base2;     /* second 4 KiB slave range on port 0, or 0 */
     uint32_t wrap;      /* slave wrapper (DMP) page, or 0 for none */
+    uint32_t size;      /* first range's size: 0 = 4 KiB, else NS_SZ_* */
 } NSCore;
+
+#define NS_SZ_64K   0x10000
+#define NS_SZ_NONE  1       /* size descriptor of 0: the unit lists no range */
 
 static const NSCore ns_cores[] = {
     { "chipcommon-a", 0x800, 0x2a, 0x18000000, 0,          0x18100000 },
-    { "chipcommon-b", 0x50b, 0x05, 0x18001000, 0,          0 },          /* no wrapper */
-    { "dma",          0x502, 0x04, 0x18020000, 0,          0x18114000 }, /* [assume] */
-    { "gmac0",        0x82d, 0x07, 0x18024000, 0,          0x18110000 }, /* wrap [assume] */
+    { "chipcommon-b", 0x50b, 0x05, 0x18001000, 0x18002000, 0 },          /* no wrapper */
+    { "dma",          0x502, 0x04, 0x1802c000, 0,          0x18114000 }, /* [assume] */
+    { "gmac0",        0x82d, 0x07, 0x18024000, 0,          0x18110000 },
     { "gmac1",        0x82d, 0x07, 0x18025000, 0,          0x18111000 },
     { "gmac2",        0x82d, 0x07, 0x18026000, 0,          0x18112000 },
     { "gmac3",        0x82d, 0x07, 0x18027000, 0,          0x18113000 },
     { "pcie0",        0x501, 0x07, 0x18012000, 0,          0x18101000 }, /* wrap [assume] */
     { "pcie1",        0x501, 0x07, 0x18013000, 0,          0x18102000 },
     { "pcie2",        0x501, 0x07, 0x18014000, 0,          0x18103000 },
-    { "ihost",        0x510, 0x07, 0x19000000, 0,          0x18106000 }, /* [assume] */
+    { "armca9",       0x510, 0x07, 0x1800b000, 0x1800c000, 0x18106000 }, /* [assume] */
     { "usb2",         0x504, 0x07, 0x18021000, 0x18022000, 0x18115000 },
     { "usb3",         0x505, 0x07, 0x18023000, 0,          0x18105000 },
-    { "sdio3",        0x503, 0x01, 0x1802b000, 0,          0x18116000 }, /* [assume] */
+    { "sdio3",        0x503, 0x01, 0x18020000, 0,          0x18116000 }, /* [assume] */
     { "i2s",          0x834, 0x03, 0x1802a000, 0,          0x18117000 },
-    { "a9-jtag",      0x506, 0x01, 0x18210000, 0,          0x18118000 }, /* [assume] */
+    { "a9-jtag",      0x506, 0x01, 0x18210000, 0,          0x18118000, NS_SZ_64K },
     { "ddr",          0x507, 0x01, 0x18010000, 0,          0x18108000 },
-    { "rom",          0x508, 0x08, 0xfffd0000, 0,          0x18109000 }, /* wrap [assume] */
+    { "rom",          0x508, 0x08, 0xfffd0000, 0,          0x18109000, NS_SZ_NONE },
     { "nand",         0x509, 0x01, 0x18028000, 0,          0x1811a000 },
     { "qspi",         0x50a, 0x01, 0x18029000, 0,          0x1811b000 }, /* wrap [assume] */
 };
@@ -194,7 +223,12 @@ static size_t ns_build_erom(uint32_t *e)
         e[n++] = (0x4bfu << 20) | ((uint32_t)c->cid << 8) | 1;          /* CIA */
         e[n++] = ((uint32_t)c->rev << 24) | (nsw << 19) | (0 << 14) |  /* CIB */
                  (1 << 9) | (0 << 4) | 1;                              /* nsp=1 */
-        e[n++] = c->base | (0 << 8) | 0x00 | 0x00 | 0x4 | 1;           /* SP0 slave 4K */
+        if (c->size) {                                                 /* SP0 slave, SZD */
+            e[n++] = c->base | (0 << 8) | 0x00 | 0x30 | 0x4 | 1;
+            e[n++] = c->size == NS_SZ_NONE ? 0 : c->size;
+        } else {
+            e[n++] = c->base | (0 << 8) | 0x00 | 0x00 | 0x4 | 1;       /* SP0 slave 4K */
+        }
         if (c->base2) {
             e[n++] = c->base2 | (0 << 8) | 0x00 | 0x00 | 0x4 | 1;
         }
@@ -495,6 +529,9 @@ static void ns_init(MachineState *machine, const NSVariant *v)
     cc = qdev_new(TYPE_BCM_NS_CHIPCOMMON);
     qdev_prop_set_uint32(cc, "chipid", v->chipid);
     qdev_prop_set_uint32(cc, "capabilities", NS_CC_CAPS);
+    qdev_prop_set_uint32(cc, "corecontrol", NS_CC_CORECONTROL);
+    qdev_prop_set_uint32(cc, "clkdiv", NS_CC_CLKDIV);
+    qdev_prop_set_uint32(cc, "gpio-pullup-in", v->gpio_pads);
     qdev_prop_set_uint32(cc, "eromptr", NS_EROM_BASE);
     qdev_prop_set_uint32(cc, "watchdog-hz", NS_ALP_HZ);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(cc), &error_fatal);
@@ -516,7 +553,7 @@ static void ns_init(MachineState *machine, const NSVariant *v)
 
     /* NAND controller (nandcore). Its IDM wrapper page overlays the generic
      * IDM so the endian toggle (ioctrl bit 24) reaches the data path. The
-     * part is the ESMT F59L1G81 the stock boot log reports (C8 D1 80 95 40);
+     * part is the ESMT F59L1G81 a unit reports (ID C8 D1 80 95 42 7F);
      * config/acc_control are what CFE leaves programmed. */
     {
         DeviceState *nand = qdev_new("bcm-ns-nand");
@@ -526,7 +563,7 @@ static void ns_init(MachineState *machine, const NSVariant *v)
             qdev_prop_set_drive_err(nand, "drive", blk_by_legacy_dinfo(dinfo),
                                     &error_fatal);
         }
-        qdev_prop_set_uint64(nand, "device-id", 0x409580d1c8ULL);
+        qdev_prop_set_uint64(nand, "device-id", 0x7f429580d1c8ULL);
         qdev_prop_set_uint32(nand, "revision", 0x0601);         /* [assume] v6.1 */
         qdev_prop_set_uint32(nand, "config-cs0", 0x25152300);
         qdev_prop_set_uint32(nand, "acc-control-cs0", 0xc0080010);
@@ -566,8 +603,9 @@ static void ns_init(MachineState *machine, const NSVariant *v)
             sysbus_mmio_map(SYS_BUS_DEVICE(gmac[n]), 0, NS_GMAC_BASE + n * 0x1000);
             sysbus_connect_irq(SYS_BUS_DEVICE(gmac[n]), 0,
                                qdev_get_gpio_in(mpcore, NS_SPI_GMAC + n));
-            /* SISF_DMA64: hnddma uses the dma64 engine only when this is set */
-            bcm_ns_idm_set_iostatus(BCM_NS_IDM(idm), NS_GMAC_WRAP + n * 0x1000, 0x1000);
+            /* SISF_DMA64 (bit 12): hnddma uses the dma64 engine only when set */
+            bcm_ns_idm_set_iostatus(BCM_NS_IDM(idm), NS_GMAC_WRAP + n * 0x1000,
+                                    v->gmac_iostatus[n]);
         }
         bcm53012_connect_gmac(BCM53012(sw), 7, BCM_NS_GMAC(gmac[1]));
         bcm53012_connect_gmac(BCM53012(sw), 8, BCM_NS_GMAC(gmac[2]));
