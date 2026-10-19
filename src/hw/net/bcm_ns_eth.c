@@ -30,8 +30,21 @@
  *     link/speed/duplex summaries are matched to a unit's registers.
  *   - The VLAN table (5395-style access at 05:80/81/83) and per-port PVIDs
  *     (34:10+2p) drive forwarding. Ports 0-4 can carry a QEMU netdev, port 7
- *     is GMAC1, port 8 (IMP) is GMAC2. No MAC learning: frames flood to the
- *     VLAN's members.
+ *     is GMAC1, port 8 (IMP) is GMAC2. Source MACs are learned per VLAN;
+ *     a known unicast goes to its port, everything else floods to the VLAN's
+ *     members.
+ *   - MIB counters (page 0x20 + port, 0x00-0xbc) count the frames each port
+ *     sends and receives, as on the wire: FCS included, short frames padded
+ *     to 64 octets, the Broadcom header included on a port that carries it.
+ *     Offsets are those the firmware's userspace reads (per-port packet and
+ *     byte counts, wired traffic), which a unit's page dumps agree with:
+ *     octets 00 (TX), 50 (RX), 88 (RX good), 64-bit; TX queue 0, broadcast,
+ *     multicast, unicast at 0c/10/14/18; RX size bins at 60-74 (64 ..
+ *     1024-1522); RX unicast, multicast, broadcast at 94/98/9c;
+ *     source-address changes at a0. A read does not clear them (the unit's IMP page grew between two
+ *     reads 2 s apart); reset does, and so does 02:00 bit 0 ([assume] the
+ *     public b53 driver's MIB reset bit). Every frame is good and goes to
+ *     queue 0; nothing counts errors, drops, collisions or pause frames.
  *   - Broadcom header (02:03 bit 0/1/2 = port 8/5/7): et's agg_attach turns it
  *     on for the IMP port through robo_bhdr_register(). Frames to such a port
  *     carry a 4-byte tag after the source MAC (opcode 0, source port in byte
@@ -458,6 +471,24 @@ static void gmac_class_init(ObjectClass *klass, const void *data)
 #define NOLINK_1000FD_PORT  6           /* reads 1000FD with no link on a unit */
 #define IMP_PORT            8
 #define BRCM_TAG_LEN        4
+#define FCS_LEN             4
+#define GC_RESET_MIB        0x01        /* 02:00 global management config */
+
+/* MIB page, 0x20 + port (byte offsets) */
+#define PAGE_MIB(p)         (0x20 + (p))
+#define MIB_TX_OCTETS       0x00
+#define MIB_TX_Q0           0x0c
+#define MIB_TX_BCAST        0x10
+#define MIB_TX_MCAST        0x14
+#define MIB_TX_UCAST        0x18
+#define MIB_RX_OCTETS       0x50
+#define MIB_RX_64           0x60        /* then 65-127, 128-255, 256-511, 512-1023, 1024-1522 */
+#define MIB_RX_OVERSIZE     0x78
+#define MIB_RX_GOOD_OCTETS  0x88
+#define MIB_RX_UCAST        0x94
+#define MIB_RX_MCAST        0x98
+#define MIB_RX_BCAST        0x9c
+#define MIB_RX_SA_CHANGES   0xa0
 
 /* 02:03 BRCM_HDR enable: bit 0 = port 8, bit 1 = port 5, bit 2 = port 7 */
 static bool sw_bhdr(BCM53012State *sw, int p)
@@ -476,6 +507,51 @@ static bool sw_link(BCM53012State *sw, int p)
                !(sw->regs[R(PAGE_GPHY(p), 0x00)] & BMCR_PDOWN);
     }
     return p == 5 || p == 7 || p == IMP_PORT;
+}
+
+static bool mib_octets(int reg)
+{
+    return reg == MIB_TX_OCTETS || reg == MIB_RX_OCTETS || reg == MIB_RX_GOOD_OCTETS;
+}
+
+static void mib_add(BCM53012State *sw, int p, int reg, uint32_t n)
+{
+    uint32_t *w = &sw->mib[p][reg / 4];
+
+    if (mib_octets(reg) && w[0] + n < w[0]) {
+        w[1]++;
+    }
+    w[0] += n;
+}
+
+/* buf/len as on the wire without FCS: padded, carrying any Broadcom header */
+static void mib_count(BCM53012State *sw, int p, bool rx, const uint8_t *buf, size_t len)
+{
+    static const uint8_t bcast[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    static const int tx_kind[3] = { MIB_TX_UCAST, MIB_TX_MCAST, MIB_TX_BCAST };
+    static const int rx_kind[3] = { MIB_RX_UCAST, MIB_RX_MCAST, MIB_RX_BCAST };
+    uint32_t octets = MAX(len, 60) + FCS_LEN;
+    int kind = !memcmp(buf, bcast, 6) ? 2 : buf[0] & 1;    /* 0 uni, 1 multi, 2 broad */
+    int bin = octets <= 64 ? 0 : octets <= 127 ? 1 : octets <= 255 ? 2 :
+              octets <= 511 ? 3 : octets <= 1023 ? 4 : octets <= 1522 ? 5 : -1;
+
+    if (sw->regs[R(0x02, 0x00)] & GC_RESET_MIB) {
+        return;
+    }
+    if (!rx) {
+        mib_add(sw, p, MIB_TX_OCTETS, octets);
+        mib_add(sw, p, MIB_TX_Q0, 1);
+        mib_add(sw, p, tx_kind[kind], 1);
+        return;
+    }
+    mib_add(sw, p, MIB_RX_OCTETS, octets);
+    mib_add(sw, p, MIB_RX_GOOD_OCTETS, octets);
+    mib_add(sw, p, bin < 0 ? MIB_RX_OVERSIZE : MIB_RX_64 + 4 * bin, 1);
+    mib_add(sw, p, rx_kind[kind], 1);
+    if (memcmp(sw->mib_sa[p], buf + 6, 6)) {
+        memcpy(sw->mib_sa[p], buf + 6, 6);
+        mib_add(sw, p, MIB_RX_SA_CHANGES, 1);
+    }
 }
 
 static uint64_t robo_read(BCM53012State *sw, int page, int reg)
@@ -505,6 +581,15 @@ static uint64_t robo_read(BCM53012State *sw, int page, int reg)
             v |= (uint64_t)(g ? 2 : 0) << (2 * p);
         }
         return v;
+    }
+    if (page >= PAGE_MIB(0) && page < PAGE_MIB(BCM53012_NPORTS) &&
+        reg < 4 * BCM53012_MIB_WORDS) {
+        uint32_t *w = &sw->mib[page - PAGE_MIB(0)][reg / 4];
+
+        if (reg & 3) {
+            return 0;
+        }
+        return mib_octets(reg) ? ((uint64_t)w[1] << 32) | w[0] : w[0];
     }
     if (page >= PAGE_GPHY(0) && page < PAGE_GPHY(BCM53012_NEXT)) {
         bool link = sw_link(sw, page - PAGE_GPHY(0));
@@ -544,6 +629,16 @@ static void robo_write(BCM53012State *sw, int page, int reg, uint64_t v)
     case R(0x05, 0x00):                         /* ARL access: no ARL; done at once */
         v &= ~(uint64_t)0x80;
         break;
+    case R(0x02, 0x00):
+        if (v & GC_RESET_MIB) {
+            memset(sw->mib, 0, sizeof(sw->mib));
+            memset(sw->mib_sa, 0, sizeof(sw->mib_sa));
+        }
+        break;
+    }
+    if (page >= PAGE_MIB(0) && page < PAGE_MIB(BCM53012_NPORTS) &&
+        reg < 4 * BCM53012_MIB_WORDS) {
+        return;                                 /* counters are read-only */
     }
     if (page >= PAGE_GPHY(0) && page < PAGE_GPHY(BCM53012_NEXT) && reg == 0x00) {
         /* reset and restart-autoneg self-clear; reset restores the default */
@@ -580,6 +675,7 @@ static void sw_egress(BCM53012State *sw, int p, int src, const uint8_t *buf, siz
         buf = pad;
         len = 60;
     }
+    mib_count(sw, p, false, buf, len);
     if (p < BCM53012_NEXT) {
         qemu_send_packet(qemu_get_queue(sw->ext[p].nic), buf, len);
     } else if (sw->gmac[p]) {
@@ -635,6 +731,7 @@ void bcm53012_ingress(BCM53012State *sw, int port, const uint8_t *buf, size_t le
     if (len < 14 || !sw_link(sw, port)) {
         return;
     }
+    mib_count(sw, port, true, buf, len);
     if (sw_bhdr(sw, port)) {
         uint8_t opcode = buf[12] >> 5;
         uint16_t dst = ((buf[14] & 1) << 8) | buf[15];
@@ -866,6 +963,8 @@ static void sw_reset(DeviceState *dev)
     }
     memset(sw->vtable, 0, sizeof(sw->vtable));
     memset(sw->arl, 0, sizeof(sw->arl));
+    memset(sw->mib, 0, sizeof(sw->mib));
+    memset(sw->mib_sa, 0, sizeof(sw->mib_sa));
 }
 
 static int sw_post_load(void *opaque, int version_id)
@@ -894,7 +993,7 @@ static const Property sw_properties[] = {
 
 static const VMStateDescription vmstate_sw = {
     .name = TYPE_BCM53012,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = sw_post_load,
     .fields = (const VMStateField[]) {
@@ -906,6 +1005,8 @@ static const VMStateDescription vmstate_sw = {
         VMSTATE_UINT32(ctrls, BCM53012State),
         VMSTATE_UINT64_ARRAY(regs, BCM53012State, 256 * 256),
         VMSTATE_UINT32_ARRAY(vtable, BCM53012State, 4096),
+        VMSTATE_UINT32_2DARRAY_V(mib, BCM53012State, BCM53012_NPORTS, BCM53012_MIB_WORDS, 2),
+        VMSTATE_UINT8_2DARRAY_V(mib_sa, BCM53012State, BCM53012_NPORTS, 6, 2),
         VMSTATE_END_OF_LIST()
     },
 };

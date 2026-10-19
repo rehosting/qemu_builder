@@ -41,6 +41,7 @@ void bcm_ns_gmac_receive(BCMNSGmacState *s, const uint8_t *buf, size_t len);
 #define BCM53012_NPORTS    9           /* 0-4 GPHY, 5 RGMII, 7 GMAC1, 8 IMP (GMAC2) */
 #define BCM53012_NEXT      5           /* ports 0-4 can carry a QEMU netdev */
 #define BCM53012_ARL_SIZE  1024
+#define BCM53012_MIB_WORDS (0xc0 / 4)  /* a port's MIB page, 0x00-0xbc */
 
 /* A non-GMAC MAC on a switch port (port 5: the RTL8365MB's RGMII uplink) */
 typedef void BCM53012MacFn(void *opaque, const uint8_t *buf, size_t len);
@@ -65,6 +66,12 @@ struct BCM53012State {
     /* switch registers, one value per (page, reg) as the driver addresses them */
     uint64_t regs[256 * 256];
     uint32_t vtable[4096];             /* bits 8:0 members, 17:9 untagged */
+    /*
+     * MIB counters, page 0x20 + port, one word per 4 bytes as the page lays
+     * them out (an octet counter is two: low word first)
+     */
+    uint32_t mib[BCM53012_NPORTS][BCM53012_MIB_WORDS];
+    uint8_t mib_sa[BCM53012_NPORTS][6]; /* last source address, for RxSAChanges */
     /* learned addresses: hash of (vid, mac) -> port; soft state, rebuilt by traffic */
     struct {
         uint8_t mac[6];
