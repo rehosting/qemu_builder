@@ -13,6 +13,13 @@
  *      sends "CONNECT [GUESTIP ]PORT\n" and gets "OK PORT\n" (or "ERR n\n")
  *      once the guest has connected, then the raw stream.
  *
+ * wl: a unix socket where a wlsim responder listens. The guest module's
+ *      Wi-Fi stand-in (wlshim, include/hw/misc/wlshim_proto.h) makes one
+ *      synchronous hypercall per request; each is forwarded unchanged as
+ *      u32 length + message and the vCPU waits for the reply. The socket is
+ *      connected lazily (and again after a failure, at most once a second);
+ *      until it is, the guest sees "no host side".
+ *
  * Standalone use: this takes over QEMU's single penguin hypercall callback,
  * so it is for runs without Penguin attached. Under Penguin the same protocol
  * would be served by a plugin instead.
@@ -27,6 +34,7 @@
 #include "qemu/error-report.h"
 #include "qemu/thread.h"
 #include "qemu/cutils.h"
+#include "qemu/timer.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "hw/core/qdev.h"
@@ -36,6 +44,7 @@
 #include "system/memory.h"
 #include "system/runstate.h"
 #include "hw/misc/igloo_bridge_proto.h"
+#include "hw/misc/wlshim_proto.h"
 #include <glib-unix.h>
 #include <sys/un.h>
 #include <poll.h>
@@ -73,7 +82,7 @@ typedef struct BridgeConn {
 
 struct IglooBridge {
     DeviceState parent_obj;
-    char *fwd, *ctl;
+    char *fwd, *ctl, *wl;
 
     QemuMutex lock;
     QemuThread thread;
@@ -83,6 +92,11 @@ struct IglooBridge {
     GArray *listeners;              /* BridgeListener */
     GPtrArray *conns;               /* BridgeConn * */
     GArray *rst;                    /* guest conn ids the host doesn't know */
+
+    QemuMutex wl_lock;              /* one wlshim request at a time */
+    int wl_fd;
+    int64_t wl_retry;               /* earliest next connect, ms */
+    bool wl_said;                   /* "responder connected" logged */
 };
 
 static void bridge_wake(IglooBridge *s)
@@ -249,18 +263,14 @@ static uint32_t bridge_fill_rx(IglooBridge *s, uint8_t *rx)
     return len;
 }
 
-static int bridge_hypercall(CPUState *cs, uint64_t nr, uint64_t a0,
-                            uint64_t a1, uint64_t a2, uint64_t a3,
-                            uint64_t a4, uint64_t a5, uint64_t *ret,
-                            void *opaque)
+static int bridge_hypercall(IglooBridge *s, uint64_t a0, uint64_t a1,
+                            uint64_t a2, uint64_t a3, uint64_t *ret)
 {
-    IglooBridge *s = opaque;
     g_autofree uint8_t *tx = NULL;
     g_autofree uint8_t *rx = NULL;
     uint32_t txlen = a2, rxlen;
 
-    if (nr != IGLOO_BRIDGE_HC || a0 != IGLOO_BRIDGE_MAGIC ||
-        txlen > IGLOO_BRIDGE_BUF) {
+    if (a0 != IGLOO_BRIDGE_MAGIC || txlen > IGLOO_BRIDGE_BUF) {
         return -1;
     }
     tx = g_malloc(txlen + 1);
@@ -289,6 +299,155 @@ static int bridge_hypercall(CPUState *cs, uint64_t nr, uint64_t a0,
     }
     *ret = rxlen;
     return 0;
+}
+
+/* ---- wlshim: forward each request to the responder ---- */
+
+static bool wl_io(int fd, void *buf, size_t n, bool out)
+{
+    uint8_t *p = buf;
+
+    while (n) {
+        ssize_t r = out ? send(fd, p, n, MSG_NOSIGNAL) : recv(fd, p, n, 0);
+        if (r < 0 && errno == EINTR) {
+            continue;
+        }
+        if (r <= 0) {
+            return false;
+        }
+        p += r;
+        n -= r;
+    }
+    return true;
+}
+
+static void wl_connect(IglooBridge *s)
+{
+    struct sockaddr_un sun = { .sun_family = AF_UNIX };
+    struct timeval tv = { .tv_sec = 10 };   /* a hung responder fails the call */
+    int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    int fd;
+
+    if (now < s->wl_retry) {
+        return;
+    }
+    s->wl_retry = now + 1000;
+    fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        return;
+    }
+    pstrcpy(sun.sun_path, sizeof(sun.sun_path), s->wl);
+    if (connect(fd, (struct sockaddr *)&sun, sizeof(sun))) {
+        close(fd);
+        return;
+    }
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    s->wl_fd = fd;
+    if (!s->wl_said) {
+        s->wl_said = true;
+        info_report("igloo-bridge: wl responder connected (%s)", s->wl);
+    }
+}
+
+static void wl_drop(IglooBridge *s, const char *why)
+{
+    warn_report("igloo-bridge: wl responder %s; reconnecting", why);
+    close(s->wl_fd);
+    s->wl_fd = -1;
+    s->wl_said = false;
+}
+
+static int wl_hypercall(IglooBridge *s, uint64_t a0, uint64_t op,
+                        uint64_t pa, uint64_t size, uint64_t *ret)
+{
+    g_autofree uint8_t *buf = NULL;
+    struct wlshim_hdr h;
+    uint32_t n, m;
+
+    if (!s->wl || a0 != WLSHIM_MAGIC) {
+        return -1;                      /* r0 comes back unchanged */
+    }
+    if (size > WLSHIM_BUF) {
+        size = WLSHIM_BUF;
+    }
+    if (size < sizeof(h) ||
+        address_space_read(&address_space_memory, pa, MEMTXATTRS_UNSPECIFIED,
+                           &h, sizeof(h))) {
+        *ret = WLSHIM_EHOST;
+        return 0;
+    }
+    n = sizeof(h) + MIN(le32_to_cpu(h.len), size - sizeof(h));
+    buf = g_malloc(size);
+    if (address_space_read(&address_space_memory, pa, MEMTXATTRS_UNSPECIFIED,
+                           buf, n)) {
+        *ret = WLSHIM_EHOST;
+        return 0;
+    }
+    ((struct wlshim_hdr *)buf)->len = cpu_to_le32(n - sizeof(h));
+
+    qemu_mutex_lock(&s->wl_lock);
+    if (s->wl_fd < 0) {
+        wl_connect(s);
+    }
+    if (s->wl_fd < 0) {
+        qemu_mutex_unlock(&s->wl_lock);
+        return -1;                      /* no host side yet */
+    }
+    m = cpu_to_le32(n);
+    if (!wl_io(s->wl_fd, &m, 4, true) || !wl_io(s->wl_fd, buf, n, true)) {
+        wl_drop(s, "write failed");
+        goto fail;
+    }
+    if (!wl_io(s->wl_fd, &m, 4, false)) {
+        wl_drop(s, "closed or timed out");
+        goto fail;
+    }
+    m = le32_to_cpu(m);
+    if (m < sizeof(h) || m > size) {
+        wl_drop(s, "sent a bad reply length");
+        goto fail;
+    }
+    if (!wl_io(s->wl_fd, buf, m, false)) {
+        wl_drop(s, "closed mid-reply");
+        goto fail;
+    }
+    qemu_mutex_unlock(&s->wl_lock);
+
+    /* the payload length must match what was sent */
+    n = le32_to_cpu(((struct wlshim_hdr *)buf)->len);
+    if (n > m - sizeof(h)) {
+        ((struct wlshim_hdr *)buf)->len = cpu_to_le32(m - sizeof(h));
+    }
+    if (address_space_write(&address_space_memory, pa, MEMTXATTRS_UNSPECIFIED,
+                            buf, m)) {
+        *ret = WLSHIM_EHOST;
+        return 0;
+    }
+    *ret = 0;
+    return 0;
+
+fail:
+    qemu_mutex_unlock(&s->wl_lock);
+    *ret = WLSHIM_EHOST;
+    return 0;
+}
+
+static int igloo_hypercall(CPUState *cs, uint64_t nr, uint64_t a0,
+                           uint64_t a1, uint64_t a2, uint64_t a3,
+                           uint64_t a4, uint64_t a5, uint64_t *ret,
+                           void *opaque)
+{
+    IglooBridge *s = opaque;
+
+    switch (nr) {
+    case IGLOO_BRIDGE_HC:
+        return s->listeners->len ? bridge_hypercall(s, a0, a1, a2, a3, ret)
+                                 : -1;
+    case WLSHIM_HC:
+        return wl_hypercall(s, a0, a1, a2, a3, ret);
+    }
+    return -1;
 }
 
 /* ---- I/O thread: host sockets ---- */
@@ -638,8 +797,12 @@ static void bridge_realize(DeviceState *dev, Error **errp)
         }
         g_array_append_val(s->listeners, l);
     }
-    if (!s->listeners->len) {
-        error_setg(errp, "igloo-bridge: needs fwd= and/or ctl=");
+    if (s->wl && strlen(s->wl) >= sizeof_field(struct sockaddr_un, sun_path)) {
+        error_setg(errp, "igloo-bridge: wl path too long");
+        return;
+    }
+    if (!s->listeners->len && !(s->wl && *s->wl)) {
+        error_setg(errp, "igloo-bridge: needs fwd=, ctl= and/or wl=");
         return;
     }
     if (!g_unix_open_pipe(s->wake, FD_CLOEXEC, NULL)) {
@@ -651,7 +814,10 @@ static void bridge_realize(DeviceState *dev, Error **errp)
 
     qemu_add_vm_change_state_handler(bridge_vm_state, s);
     penguin_register_guest_hypercall(IGLOO_BRIDGE_HC);
-    set_penguin_guest_hypercall_callback(bridge_hypercall, s);
+    if (s->wl && *s->wl) {
+        penguin_register_guest_hypercall(WLSHIM_HC);
+    }
+    set_penguin_guest_hypercall_callback(igloo_hypercall, s);
     qemu_thread_create(&s->thread, "igloo-bridge", bridge_thread, s,
                        QEMU_THREAD_DETACHED);
 }
@@ -659,6 +825,7 @@ static void bridge_realize(DeviceState *dev, Error **errp)
 static const Property igloo_bridge_props[] = {
     DEFINE_PROP_STRING("fwd", IglooBridge, fwd),
     DEFINE_PROP_STRING("ctl", IglooBridge, ctl),
+    DEFINE_PROP_STRING("wl", IglooBridge, wl),
 };
 
 static void igloo_bridge_init(Object *obj)
@@ -666,6 +833,8 @@ static void igloo_bridge_init(Object *obj)
     IglooBridge *s = IGLOO_BRIDGE(obj);
 
     qemu_mutex_init(&s->lock);
+    qemu_mutex_init(&s->wl_lock);
+    s->wl_fd = -1;
     s->wake[0] = s->wake[1] = -1;
     s->listeners = g_array_new(false, true, sizeof(BridgeListener));
     s->conns = g_ptr_array_new();
@@ -677,7 +846,8 @@ static void igloo_bridge_class_init(ObjectClass *oc, const void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = bridge_realize;
-    dc->desc = "host end of the igloo.ko TCP bridge (vsock stand-in)";
+    dc->desc = "host end of the igloo.ko TCP bridge (vsock stand-in) "
+               "and Wi-Fi stand-in";
     device_class_set_props(dc, igloo_bridge_props);
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
     /* host sockets and threads: never migrated, see the header comment */
