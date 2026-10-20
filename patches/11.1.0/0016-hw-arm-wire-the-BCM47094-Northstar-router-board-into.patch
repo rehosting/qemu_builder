@@ -9,8 +9,11 @@ devices: src/hw/arm/bcm4709.c (machine "bcm47094-router"),
 src/hw/misc/bcm_ns.c (ChipCommon, IDM wrappers, EROM, DMU/CRU),
 src/hw/block/bcm_ns_nand.c (NAND controller), src/hw/net/bcm_ns_eth.c
 (GMAC + BCM53012 switch), src/hw/net/rtl8365mb.c (external switch on
-bit-banged SMI) and src/hw/usb/bcm_ns_usb.c (the SoC's EHCI, OHCI and
-xHCI, built on QEMU's sysbus controllers, which the board selects). Like
+bit-banged SMI), src/hw/usb/bcm_ns_usb.c (the SoC's EHCI, OHCI and
+xHCI, built on QEMU's sysbus controllers, which the board selects),
+src/hw/pci-host/bcm_ns_pcie.c (the three PCIe root complexes, on
+PCI_EXPRESS) and src/hw/net/bcm4366.c with bcm4366_fw.c (the BCM4366
+radios as PCIe full-dongle endpoints, and their firmware stand-in). Like
 the penguin.c wiring in patch 0001, those files are vendored authored
 sources; this patch only references them from the upstream Kconfig and
 meson.build files.
@@ -20,19 +23,20 @@ from a NAND image. It depends on the a9mpcore periphclk-frequency,
 arm_l2x0 aux-ctrl and serial tx-pacing properties added earlier in the
 series.
 ---
- hw/arm/Kconfig       | 13 +++++++++++++
- hw/arm/meson.build   |  1 +
- hw/block/meson.build |  2 ++
- hw/misc/meson.build  |  2 ++
- hw/net/meson.build   |  1 +
- hw/usb/meson.build   |  2 ++
- 6 files changed, 21 insertions(+)
+ hw/arm/Kconfig          | 14 ++++++++++++++
+ hw/arm/meson.build      |  1 +
+ hw/block/meson.build    |  2 ++
+ hw/misc/meson.build     |  2 ++
+ hw/net/meson.build      |  2 ++
+ hw/pci-host/meson.build |  1 +
+ hw/usb/meson.build      |  2 ++
+ 7 files changed, 24 insertions(+)
 
 diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
-index 82e0bc2e7004384f98c407122c285fa43ab410f4..6f9e25df9d5d3732d1428cc8ea45c261810ee15d 100644
+index 82e0bc2e7004384f98c407122c285fa43ab410f4..54ecb276c4dc27c6e266337a2dbd230e369cb9e4 100644
 --- a/hw/arm/Kconfig
 +++ b/hw/arm/Kconfig
-@@ -243,6 +243,19 @@ config SX1
+@@ -243,6 +243,20 @@ config SX1
      depends on TCG && ARM
      select OMAP
  
@@ -48,6 +52,7 @@ index 82e0bc2e7004384f98c407122c285fa43ab410f4..6f9e25df9d5d3732d1428cc8ea45c261
 +    select USB_EHCI_SYSBUS
 +    select USB_OHCI_SYSBUS
 +    select USB_XHCI_SYSBUS
++    select PCI_EXPRESS
 +
  config VERSATILE
      bool
@@ -85,14 +90,26 @@ index 23265f6035bd566f4f301d8b5f59349255ff3e06..c171fb5dd4c200b88f83a31a4388e4d5
 +
 +system_ss.add(when: 'CONFIG_BCM4709', if_true: files('bcm_ns.c'))
 diff --git a/hw/net/meson.build b/hw/net/meson.build
-index 84f142df222afd6ac16c1e86ccdb05a222a4b65c..792bdad2efec3a625b2ff0461f6a4280ed812bf3 100644
+index 84f142df222afd6ac16c1e86ccdb05a222a4b65c..4945c8aa95528819b0b99de8b42a7d7b4fc0113d 100644
 --- a/hw/net/meson.build
 +++ b/hw/net/meson.build
-@@ -70,3 +70,4 @@ stub_ss.add(files('rocker/rocker-stubs.c'))
+@@ -70,3 +70,5 @@ stub_ss.add(files('rocker/rocker-stubs.c'))
  system_ss.add(files('rocker/rocker-hmp-cmds.c'))
  
  subdir('can')
-+system_ss.add(when: 'CONFIG_BCM4709', if_true: files('bcm_ns_eth.c', 'rtl8365mb.c'))
++system_ss.add(when: 'CONFIG_BCM4709', if_true: files('bcm_ns_eth.c', 'rtl8365mb.c',
++                                                             'bcm4366.c', 'bcm4366_fw.c'))
+diff --git a/hw/pci-host/meson.build b/hw/pci-host/meson.build
+index 3217e7e9123a39d52b418a8fa031422c9327381d..bcb139cea71c87893d6e23856cabaaf0c13a1b67 100644
+--- a/hw/pci-host/meson.build
++++ b/hw/pci-host/meson.build
+@@ -1,5 +1,6 @@
+ pci_ss = ss.source_set()
+ pci_ss.add(when: 'CONFIG_PAM', if_true: files('pam.c'))
++pci_ss.add(when: 'CONFIG_BCM4709', if_true: files('bcm_ns_pcie.c'))
+ pci_ss.add(when: 'CONFIG_PCI_BONITO', if_true: files('bonito.c'))
+ pci_ss.add(when: 'CONFIG_GT64120', if_true: files('gt64120.c'))
+ pci_ss.add(when: 'CONFIG_PCI_EXPRESS_ASPEED', if_true: files('aspeed_pcie.c'))
 diff --git a/hw/usb/meson.build b/hw/usb/meson.build
 index ba55c28ef69e18215f99b8e3bb71025efbf01376..0ec5f5c5e6bc0e1d5a7afb4ff916af3b4e11cc6f 100644
 --- a/hw/usb/meson.build

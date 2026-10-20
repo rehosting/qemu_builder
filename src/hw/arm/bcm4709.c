@@ -38,6 +38,8 @@
 #include "hw/misc/unimp.h"
 #include "hw/misc/bcm_ns.h"
 #include "hw/net/bcm_ns_eth.h"
+#include "hw/net/bcm4366.h"
+#include "hw/pci-host/bcm_ns_pcie.h"
 #include "hw/net/rtl8365mb.h"
 #include "hw/usb/bcm_ns_usb.h"
 #include "net/net.h"
@@ -106,6 +108,7 @@ typedef struct NSVariant {
     uint32_t chipid;
     uint64_t ram_size;
     bool rtl8365mb;     /* second switch on BCM53012 port 5, else GMAC0 there */
+    int nradio;         /* BCM4366 dongles on PCIe ports 1.. */
     uint32_t gpio_pads; /* level of each undriven GPIO pad (board wiring) */
     uint32_t gmac_iostatus[4];  /* GMAC0-3 IDM iostatus */
     uint32_t gmac_fifo_data[4]; /* GMAC0-3 +0x128 */
@@ -140,7 +143,7 @@ static const BCMNSGpioPin ns_bcm47094_pins[] = {
  * the unit (see bcm_ns_eth.c, "fifo-data").
  */
 static const NSVariant ns_bcm47094 = {
-    "bcm47094-router", NS_CC_CHIPID(53030u, 0u, 0u), 512 * MiB, true,
+    "bcm47094-router", NS_CC_CHIPID(53030u, 0u, 0u), 512 * MiB, true, 2,
     0x001f0ef4, { 0x0001f000, 0x0001b001, 0x00003001, 0x0001b000 },
     { 0x0000019e, 0x0000003c, 0x00001597, 0x0000032b }, ns_bcm47094_pins,
 };
@@ -149,7 +152,7 @@ static const NSVariant ns_bcm47094 = {
  * named buttons or LEDs (its firmware's pin map is not known); the gpio<N>
  * properties still drive any pin. */
 static const NSVariant ns_bcm4708 = {
-    "bcm4708-router", NS_CC_CHIPID(53010u, 2u, 0u), 256 * MiB, false,
+    "bcm4708-router", NS_CC_CHIPID(53010u, 2u, 0u), 256 * MiB, false, 0,
     0x00ffffff, { 0x1000, 0x1000, 0x1000, 0x1000 }, { 0, 0, 0, 0 }, NULL,
 };
 /*
@@ -246,6 +249,17 @@ static const NSCore ns_cores[] = {
 #define NS_USB2_WRAP  0x18115000
 #define NS_SPI_USB2   79          /* IRQ 111: ehci_hcd + ohci_hcd on the unit */
 #define NS_SPI_USB3   80          /* IRQ 112: xhci_hcd */
+/* PCIe ports 1-3 (bcm5301x_pcie.c): controller, outbound window (core rev 7,
+ * "NS-B0"), and INTx, which the kernel takes from irqs[4] of each port's
+ * six (IRQ 163 / 169 / 175). An older (NS-A0) kernel, such as a BCM4708
+ * board's, programs ports 2 and 3 at 0x40000000 / 0x48000000 instead; with
+ * no link there, the controller logs those windows and leaves them unmapped
+ * (the board's ACP DRAM alias is at 0x40000000). */
+static const struct { hwaddr regs, owin; int spi; } ns_pcie[3] = {
+    { 0x18012000, 0x08000000, 163 - 32 },
+    { 0x18013000, 0x20000000, 169 - 32 },
+    { 0x18014000, 0x28000000, 175 - 32 },
+};
 
 static size_t ns_build_erom(uint32_t *e)
 {
@@ -755,6 +769,37 @@ static void ns_init(MachineState *machine, const NSVariant *v)
     bcm_ns_usb2_create(NS_EHCI_BASE, NS_OHCI_BASE,
                        qdev_get_gpio_in(mpcore, NS_SPI_USB2));
     bcm_ns_usb3_create(NS_XHCI_BASE, qdev_get_gpio_in(mpcore, NS_SPI_USB3));
+
+    /*
+     * PCIe. A radio sits on the link of each of the first nradio ports (on
+     * a unit, port 1 is the 2.4 GHz radio, eth1; port 2 the 5 GHz, eth2);
+     * the third port has no link. Each port is its own PCI domain, as the
+     * kernel numbers them (0001, 0002, 0003); a port's secondary bus is
+     * named pcie<N>.
+     */
+    for (n = 0; n < ARRAY_SIZE(ns_pcie); n++) {
+        DeviceState *h = qdev_new(TYPE_BCM_NS_PCIE_HOST);
+        g_autofree char *child = g_strdup_printf("pcie%d", n + 1);
+
+        qdev_prop_set_uint32(h, "port", n + 1);
+        qdev_prop_set_uint64(h, "owin-base", ns_pcie[n].owin);
+        object_property_add_child(OBJECT(machine), child, OBJECT(h));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(h), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(h), 0, ns_pcie[n].regs);
+        sysbus_mmio_map(SYS_BUS_DEVICE(h), 1, ns_pcie[n].owin);
+        sysbus_connect_irq(SYS_BUS_DEVICE(h), 0,
+                           qdev_get_gpio_in(mpcore, ns_pcie[n].spi));
+        if (n < v->nradio) {
+            PCIBus *sec = pci_bridge_get_sec_bus(PCI_BRIDGE(&BCM_NS_PCIE_HOST(h)->rc));
+            PCIDevice *ep = pci_new(PCI_DEVFN(0, 0), TYPE_BCM4366);
+
+            qdev_prop_set_uint32(DEVICE(ep), "radio", n);
+            /* the radio's 802.11 device id (the unit's firmware reports
+             * 0x43c4 for 2.4 GHz, 0x43c5 for 5 GHz) */
+            qdev_prop_set_uint32(DEVICE(ep), "devid", n ? 0x43c5 : 0x43c4);
+            pci_realize_and_unref(ep, sec, &error_fatal);
+        }
+    }
 
     /* EROM */
     erom_words = ns_build_erom(erom);
