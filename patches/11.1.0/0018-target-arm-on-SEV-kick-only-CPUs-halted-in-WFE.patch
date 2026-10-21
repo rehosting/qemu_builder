@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Wed, 21 Oct 2026 11:11:30 -0400
+Subject: [PATCH] target/arm: on SEV, kick only CPUs halted in WFE
+
+HELPER(sev) sets every CPU's event register and then kicks every other
+vCPU. A CPU that is running doesn't need the kick: it consumes the event
+register at its next WFE. The kick is not free for either side (a condvar
+broadcast plus a forced exit from the target's execution loop), and
+32-bit Arm Linux executes SEV in every spin_unlock, so an SMP guest pays
+it constantly.
+
+Kick only CPUs that are halted in WFE. The barrier pairs with one added
+after `halted` is set in HELPER(wfe) and HELPER(wfet): either SEV sees
+`halted` and kicks, or the sleeper's has-work check sees the event
+register before it waits.
+
+On a dual Cortex-A9 board under a single-threaded web-server load, three
+paired runs give 22-29% more requests per second and 17-22% lower median
+latency, with no regression in the latency tail and less host CPU.
+---
+ target/arm/tcg/op_helper.c | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/target/arm/tcg/op_helper.c b/target/arm/tcg/op_helper.c
+index 943e0129e6a02892383353a73b41bbec790ed6ea..3e9c7510a296c8041d21383137a49664ee8caae7 100644
+--- a/target/arm/tcg/op_helper.c
++++ b/target/arm/tcg/op_helper.c
+@@ -492,8 +492,18 @@ void HELPER(sev)(CPUARMState *env)
+     CPUState *cs = env_cpu(env);
+     CPU_FOREACH(cs) {
+         ARMCPU *target_cpu = ARM_CPU(cs);
+-        target_cpu->env.event_register = true;
+-        if (!qemu_cpu_is_self(cs)) {
++        qatomic_set(&target_cpu->env.event_register, true);
++        if (qemu_cpu_is_self(cs)) {
++            continue;
++        }
++        /*
++         * Only a CPU asleep in WFE needs a kick. A running one sees the
++         * event register at its next WFE, and kicking it costs both sides
++         * a trip out of the execution loop on every spin_unlock. Pairs
++         * with the barrier after halted is set in HELPER(wfe).
++         */
++        smp_mb();
++        if (qatomic_read(&cs->halted) && target_cpu->env.halt_reason == HALT_WFE) {
+             qemu_cpu_kick(cs);
+         }
+     }
+@@ -652,6 +662,8 @@ void HELPER(wfe)(CPUARMState *env, uint32_t insn_len)
+     env->halt_reason = HALT_WFE;
+     cs->exception_index = EXCP_HLT;
+     cs->halted = 1;
++    /* Pairs with HELPER(sev): it skips the kick unless it sees halted. */
++    smp_mb();
+     cpu_loop_exit(cs);
+ #endif
+ }
+@@ -746,6 +758,7 @@ void HELPER(wfet)(CPUARMState *env, uint32_t rd)
+     env->halt_reason = HALT_WFE;
+     cs->exception_index = EXCP_HLT;
+     cs->halted = 1;
++    smp_mb(); /* as in HELPER(wfe) */
+     cpu_loop_exit(cs);
+ #endif
+ }
