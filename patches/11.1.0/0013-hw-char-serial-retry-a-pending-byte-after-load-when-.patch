@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Wed, 14 Oct 2026 16:08:58 -0400
+Subject: [PATCH] hw/char/serial: retry a pending byte after load when the
+ backend can't be watched
+
+serial_post_load() re-arms transmission of a byte that was in flight at
+savevm time (tsr_retry > 0) by calling qemu_chr_fe_add_watch(). When the
+chardev can't be watched at that moment -- a socket server chardev with no
+client connected yet returns 0 -- no watch is installed, nothing ever calls
+serial_xmit() again, and the transmitter stays busy forever: the guest sees
+THRE/TEMT clear and its console is dead after the restore.
+
+Schedule a one-shot bottom half in that case. serial_xmit() then either
+sends the byte, installs a watch, or drops the byte after the retry limit,
+which is what would have happened without the snapshot.
+
+Reproducer: a guest printing steadily to a socket chardev whose client
+stops reading; savevm while the socket is full; restart with -loadvm and
+no client attached. Before: console silent forever (tsr_retry=1, lsr=0
+after load). After: output resumes.
+---
+ hw/char/serial.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/hw/char/serial.c b/hw/char/serial.c
+index 0729cd2ce9d7b122d13bd6b08b8b74962fb86a2e..5a99918de512f7e4a57b7550a7669c4bc40ab25f 100644
+--- a/hw/char/serial.c
++++ b/hw/char/serial.c
+@@ -31,6 +31,7 @@
+ #include "chardev/char-serial.h"
+ #include "qapi/error.h"
+ #include "qemu/timer.h"
++#include "qemu/main-loop.h"
+ #include "system/reset.h"
+ #include "system/runstate.h"
+ #include "qemu/error-report.h"
+@@ -646,6 +647,15 @@ static int serial_pre_load(void *opaque)
+     return 0;
+ }
+ 
++static void serial_retry_bh(void *opaque)
++{
++    SerialState *s = opaque;
++
++    if (s->tsr_retry > 0 && !s->watch_tag) {
++        serial_xmit(s);
++    }
++}
++
+ static int serial_post_load(void *opaque, int version_id)
+ {
+     SerialState *s = opaque;
+@@ -672,6 +682,16 @@ static int serial_post_load(void *opaque, int version_id)
+         assert(s->watch_tag == 0);
+         s->watch_tag = qemu_chr_fe_add_watch(&s->chr, G_IO_OUT | G_IO_HUP,
+                                              serial_watch_cb, s);
++        if (!s->watch_tag) {
++            /*
++             * The backend can't be watched (e.g. a server socket with no
++             * client yet), so nothing would ever retry and the transmitter
++             * would stay busy forever. Retry once the load is done;
++             * serial_xmit() drops the byte if the backend still can't take it.
++             */
++            aio_bh_schedule_oneshot(qemu_get_aio_context(),
++                                    serial_retry_bh, s);
++        }
+     } else {
+         /* tsr_retry == 0 implies LSR.TEMT = 1 (transmitter empty).  */
+         if (!(s->lsr & UART_LSR_TEMT)) {

@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Wed, 14 Oct 2026 16:09:20 -0400
+Subject: [PATCH] target/arm: save and restore the Secure bank of AArch32 cp
+ registers
+
+write_cpustate_to_list() and write_list_to_cpustate() map each entry of
+cpreg_indexes[] back to a cpreg id with kvm_to_cpreg_id(). That function
+forces the AArch32 NS bit on, so for a TCG CPU with EL3 every Secure-bank
+AArch32 register (DACR_S, TTBR1_S, CONTEXTIDR_S, DFAR_S, IFAR_S, ...)
+is looked up as its Non-secure twin. The Secure values are never saved,
+and on load the Non-secure values are written over them.
+
+A guest that runs in Secure state (an AArch32 Linux booted at EL3, as
+on boards without a secure monitor) therefore loses its domain access
+control and translation table setup across savevm/loadvm, and faults at
+the vector base right after the restore.
+
+Add cpreg_list_id_to_cpreg_id(), the exact inverse of cpreg_to_kvm_id()
+for the ids TCG builds, and use it in both directions. KVM lists contain
+only AArch64 ids, for which it matches kvm_to_cpreg_id().
+---
+ target/arm/cpregs.h | 21 +++++++++++++++++++++
+ target/arm/helper.c |  4 ++--
+ 2 files changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/target/arm/cpregs.h b/target/arm/cpregs.h
+index 391c0e322b7097ccf05b9fc2edc04b0e5cc821e7..95d2770392686f8fda9185932a2c1cf45cc041e9 100644
+--- a/target/arm/cpregs.h
++++ b/target/arm/cpregs.h
+@@ -258,6 +258,27 @@ static inline uint64_t cpreg_to_kvm_id(uint32_t cpregid)
+     return kvmid;
+ }
+ 
++/*
++ * Exact inverse of cpreg_to_kvm_id(), for ids in cpu->cpreg_indexes[] that
++ * QEMU itself built (TCG). Unlike kvm_to_cpreg_id() it does not force the
++ * AArch32 NS bit on: that would map every Secure-bank AArch32 register onto
++ * its Non-secure twin, so the Secure bank (DACR_S, TTBR1_S, CONTEXTIDR_S,
++ * DFAR_S, IFAR_S, ...) would never be saved or restored. KVM lists hold only
++ * AArch64 ids, for which both functions agree.
++ */
++static inline uint32_t cpreg_list_id_to_cpreg_id(uint64_t id)
++{
++    uint32_t cpregid = id;
++
++    if ((id & CP_REG_ARCH_MASK) == CP_REG_ARM64) {
++        return kvm_to_cpreg_id(id);
++    }
++    if ((id & CP_REG_SIZE_MASK) == CP_REG_SIZE_U64) {
++        cpregid |= CP_REG_AA32_64BIT_MASK;
++    }
++    return cpregid;
++}
++
+ /*
+  * Valid values for ARMCPRegInfo state field, indicating which of
+  * the AArch32 and AArch64 execution states this register is visible in.
+diff --git a/target/arm/helper.c b/target/arm/helper.c
+index af45234ad2a7e86bbc02f6faa6c5534436133e1b..89b77f3cbf3b451ed3ea944d1352e39f6371ac89 100644
+--- a/target/arm/helper.c
++++ b/target/arm/helper.c
+@@ -160,7 +160,7 @@ bool write_cpustate_to_list(ARMCPU *cpu, bool kvm_sync)
+     bool ok = true;
+ 
+     for (i = 0; i < cpu->cpreg_array_len; i++) {
+-        uint32_t regidx = kvm_to_cpreg_id(cpu->cpreg_indexes[i]);
++        uint32_t regidx = cpreg_list_id_to_cpreg_id(cpu->cpreg_indexes[i]);
+         const ARMCPRegInfo *ri;
+         uint64_t newval;
+ 
+@@ -205,7 +205,7 @@ bool write_list_to_cpustate(ARMCPU *cpu)
+     bool ok = true;
+ 
+     for (i = 0; i < cpu->cpreg_array_len; i++) {
+-        uint32_t regidx = kvm_to_cpreg_id(cpu->cpreg_indexes[i]);
++        uint32_t regidx = cpreg_list_id_to_cpreg_id(cpu->cpreg_indexes[i]);
+         uint64_t v = cpu->cpreg_values[i];
+         const ARMCPRegInfo *ri;
+ 
