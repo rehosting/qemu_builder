@@ -49,6 +49,7 @@ enum {
     R_CMD_END_ADDRESS = 0x010,
     R_INTFC_STATUS    = 0x014,
     R_CS_NAND_SELECT  = 0x018,
+    R_CS_NAND_XOR     = 0x01c,
     R_ACC_CONTROL_CS0 = 0x050,
     R_CONFIG_CS0      = 0x054,
     R_TIMING_1_CS0    = 0x058,
@@ -104,11 +105,14 @@ struct BCMNSNandState {
     /* properties: geometry and what CFE left programmed */
     uint32_t page_size, oob_size, pages_per_block, num_blocks;
     uint32_t revision, config_cs0, acc_control_cs0;
+    uint32_t cs_select_reset, cs_xor_reset, acc_control_cs1, config_cs1;
+    uint32_t timing1_reset[2], timing2_reset[2];
+    uint32_t wrap_ioctrl_reset, wrap_iostatus;
     uint64_t device_id;             /* up to 8 ID bytes, byte 0 in bits 7:0 */
 
     /* registers */
     uint32_t cmd_ext_address, cmd_address, cmd_end_address;
-    uint32_t intfc_status, cs_nand_select;
+    uint32_t intfc_status, cs_nand_select, cs_nand_xor;
     uint32_t acc_control[2], config[2], timing1[2], timing2[2];
     uint32_t id_latched, id_ext_latched;
     uint8_t  cache[SECTOR];
@@ -316,6 +320,7 @@ static uint64_t nand_read(void *opaque, hwaddr addr, unsigned size)
     case R_CMD_END_ADDRESS: return s->cmd_end_address;
     case R_INTFC_STATUS:    return s->intfc_status;
     case R_CS_NAND_SELECT:  return s->cs_nand_select;
+    case R_CS_NAND_XOR:     return s->cs_nand_xor;
     case R_ACC_CONTROL_CS0: return s->acc_control[0];
     case R_CONFIG_CS0:      return s->config[0];
     case R_TIMING_1_CS0:    return s->timing1[0];
@@ -353,6 +358,7 @@ static void nand_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
     case R_CMD_ADDRESS:     s->cmd_address = val; break;
     case R_CMD_END_ADDRESS: s->cmd_end_address = val; break;
     case R_CS_NAND_SELECT:  s->cs_nand_select = val; break;
+    case R_CS_NAND_XOR:     s->cs_nand_xor = val; break;
     case R_ACC_CONTROL_CS0: s->acc_control[0] = val; break;
     case R_CONFIG_CS0:      s->config[0] = val; break;
     case R_TIMING_1_CS0:    s->timing1[0] = val; break;
@@ -382,7 +388,7 @@ static uint64_t wrap_read(void *opaque, hwaddr addr, unsigned size)
 
     switch (addr) {
     case 0x408: return s->wrap_ioctrl;
-    case 0x500: return RO_CTRL_READY;
+    case 0x500: return s->wrap_iostatus;
     default:    return 0;
     }
 }
@@ -443,18 +449,23 @@ static void nand_reset(DeviceState *dev)
     /* As CFE leaves it: configured, ID latched, WP asserted. */
     s->cmd_ext_address = s->cmd_address = s->cmd_end_address = 0;
     s->intfc_status = IST_CTRL_READY | IST_FLASH_READY | NST_RDY | NST_ARDY;
-    s->cs_nand_select = CSEL_NAND_WP;
+    s->cs_nand_select = s->cs_select_reset;
+    s->cs_nand_xor = s->cs_xor_reset;
     s->acc_control[0] = s->acc_control_cs0;
     s->config[0] = s->config_cs0;
-    s->acc_control[1] = s->config[1] = 0;
-    s->timing1[0] = s->timing2[0] = s->timing1[1] = s->timing2[1] = 0;
+    s->acc_control[1] = s->acc_control_cs1;
+    s->config[1] = s->config_cs1;
+    for (int cs = 0; cs < 2; cs++) {
+        s->timing1[cs] = s->timing1_reset[cs];
+        s->timing2[cs] = s->timing2_reset[cs];
+    }
     stq_le_p(id, s->device_id);
     s->id_latched = ldl_be_p(id);
     s->id_ext_latched = ldl_be_p(id + 4);
     memset(s->cache, 0xff, sizeof(s->cache));
     memset(s->spare_rd, 0xff, sizeof(s->spare_rd));
     memset(s->spare_wr, 0xff, sizeof(s->spare_wr));
-    s->wrap_ioctrl = 0;
+    s->wrap_ioctrl = s->wrap_ioctrl_reset;
 }
 
 static void nand_realize(DeviceState *dev, Error **errp)
@@ -507,6 +518,16 @@ static const Property nand_properties[] = {
     DEFINE_PROP_UINT32("revision", BCMNSNandState, revision, 0),
     DEFINE_PROP_UINT32("config-cs0", BCMNSNandState, config_cs0, 0),
     DEFINE_PROP_UINT32("acc-control-cs0", BCMNSNandState, acc_control_cs0, 0),
+    DEFINE_PROP_UINT32("acc-control-cs1", BCMNSNandState, acc_control_cs1, 0),
+    DEFINE_PROP_UINT32("config-cs1", BCMNSNandState, config_cs1, 0),
+    DEFINE_PROP_UINT32("timing1-cs0", BCMNSNandState, timing1_reset[0], 0),
+    DEFINE_PROP_UINT32("timing2-cs0", BCMNSNandState, timing2_reset[0], 0),
+    DEFINE_PROP_UINT32("timing1-cs1", BCMNSNandState, timing1_reset[1], 0),
+    DEFINE_PROP_UINT32("timing2-cs1", BCMNSNandState, timing2_reset[1], 0),
+    DEFINE_PROP_UINT32("cs-select", BCMNSNandState, cs_select_reset, CSEL_NAND_WP),
+    DEFINE_PROP_UINT32("cs-xor", BCMNSNandState, cs_xor_reset, 0),
+    DEFINE_PROP_UINT32("wrap-ioctrl", BCMNSNandState, wrap_ioctrl_reset, 0),
+    DEFINE_PROP_UINT32("wrap-iostatus", BCMNSNandState, wrap_iostatus, RO_CTRL_READY),
 };
 
 /*
@@ -543,6 +564,25 @@ static int nand_post_load(void *opaque, int version_id)
     return 0;
 }
 
+/* CS_NAND_XOR, added later: sent only when the guest changed it. */
+static bool nand_xor_needed(void *opaque)
+{
+    BCMNSNandState *s = opaque;
+
+    return s->cs_nand_xor != s->cs_xor_reset;
+}
+
+static const VMStateDescription vmstate_nand_xor = {
+    .name = TYPE_BCM_NS_NAND "/cs-xor",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = nand_xor_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(cs_nand_xor, BCMNSNandState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription vmstate_nand = {
     .name = TYPE_BCM_NS_NAND,
     .version_id = 1,
@@ -565,6 +605,10 @@ static const VMStateDescription vmstate_nand = {
         VMSTATE_UINT8_ARRAY(spare_wr, BCMNSNandState, SPARE_REGS * 4),
         VMSTATE_UINT32(wrap_ioctrl, BCMNSNandState),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_nand_xor,
+        NULL
     },
 };
 

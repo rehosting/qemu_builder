@@ -47,6 +47,8 @@ struct BCMNSChipCommonState {
     uint32_t capabilities;
     uint32_t capabilities_ext;
     uint32_t chipstatus;
+    uint32_t otpstatus;                /* OTP status and layout, read-only */
+    uint32_t otplayout;
     uint32_t eromptr;
     uint32_t gpio_pullup_in;           /* level seen on undriven input pins */
     uint32_t corecontrol_reset;        /* corecontrol/clkdiv as the boot loader */
@@ -90,11 +92,13 @@ struct BCMNSIDMState {
     MemoryRegion iomem;
     uint32_t oobselouta30[BCM_NS_IDM_PAGES];
     uint32_t ioctrl[BCM_NS_IDM_PAGES];
+    uint32_t ioctrl_reset[BCM_NS_IDM_PAGES];  /* set by the board */
     uint32_t iostatus[BCM_NS_IDM_PAGES];   /* set by the board (straps) */
     uint32_t resetctrl[BCM_NS_IDM_PAGES];
 };
 
 void bcm_ns_idm_set_iostatus(BCMNSIDMState *s, hwaddr wrapper_pa, uint32_t val);
+void bcm_ns_idm_set_ioctrl(BCMNSIDMState *s, hwaddr wrapper_pa, uint32_t val);
 void bcm_ns_idm_set_oobsel(BCMNSIDMState *s, hwaddr wrapper_pa, uint32_t val);
 
 /* ---- Plain register file with reset values (DMU/CRU, iHost CRU) --------- */

@@ -78,6 +78,11 @@ static bool pcie_reg_hole(hwaddr off)
 static const struct { uint16_t off; uint32_t val; } pcie_reg_reset[] = {
     { 0xc00, 0x18000001 }, { 0xc04, 0x18001001 }, { 0xc0c, 0xffff1001 },
 };
+/* Port 1 only, as the boot loader leaves it on a unit: IMAP1 enabled at 0 and
+ * IARR1 128 MiB at PCI 0x4000000000000000, above what the model maps. */
+static const struct { uint16_t off; uint32_t val; } pcie_reg_reset_port1[] = {
+    { 0xc80, 0x00000001 }, { 0xd08, 0x00000080 }, { 0xd0c, 0x40000000 },
+};
 
 /* ---- root port config space, a unit's (port 1; port 2 differs only in
  * two PHY status words at 0x988/0x994) ---- */
@@ -448,6 +453,11 @@ static void pcie_reset_hold(Object *obj, ResetType type)
     for (size_t i = 0; i < ARRAY_SIZE(pcie_reg_reset); i++) {
         s->reg[pcie_reg_reset[i].off / 4] = pcie_reg_reset[i].val;
     }
+    if (s->port == 1) {
+        for (size_t i = 0; i < ARRAY_SIZE(pcie_reg_reset_port1); i++) {
+            s->reg[pcie_reg_reset_port1[i].off / 4] = pcie_reg_reset_port1[i].val;
+        }
+    }
     /* IMAP0 window 2: this port's own core */
     s->reg[(PCIE_IMAP0 + 8) / 4] = (0x18012000 + (s->port - 1) * 0x1000) | 1;
     pcie_update_irq(s);
@@ -499,6 +509,10 @@ static void pcie_host_realize(DeviceState *dev, Error **errp)
 
     h->bus = pci_register_root_bus(dev, name, pcie_set_irq, pci_swizzle_map_irq_fn,
                                    s, &s->pci_mem, &s->pci_io, 0, 4, TYPE_PCIE_BUS);
+    /* Set before the root port realizes: its secondary bus takes the flag
+     * from here, and the root bus itself is realized only after us. Without
+     * it the endpoints' config space reads as 256 bytes. */
+    h->bus->flags |= PCI_BUS_EXTENDED_CONFIG_SPACE;
     pci_setup_iommu(h->bus, &pcie_iommu_ops, s);
 
     PCI_BRIDGE(&s->rc)->bus_name = g_strdup(secname);

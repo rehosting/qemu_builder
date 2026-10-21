@@ -160,11 +160,15 @@ static const NSVariant ns_bcm4708 = {
  * capabilities = 2 UARTs, UARTs on the internal clock (UCLKSEL 1), OTP size 1,
  * JTAG master; corecontrol = 0x39 (bit 0: UART clock override, so the CCA
  * UARTs run at iproc_slow_clk, 125 MHz). The kernel prints "CCA UART Clock
- * Config: Sel=1 Ovr=1 Div=48"; clkdiv's other fields are [assume] 0.
+ * Config: Sel=1 Ovr=1 Div=48" from clkdiv's low byte. OTP status/layout,
+ * clkdiv's other fields and capabilities_ext are the unit's words too.
  */
 #define NS_CC_CAPS           0x0048000au
+#define NS_CC_CAPS_EXT       0x00000002u
 #define NS_CC_CORECONTROL    0x00000039u
-#define NS_CC_CLKDIV         0x00000030u
+#define NS_CC_CLKDIV         0x000e0830u
+#define NS_CC_OTPSTATUS      0x00009000u
+#define NS_CC_OTPLAYOUT      0x00111200u
 
 /*
  * Boot ROM. The real mask ROM is not available; this models only what the
@@ -234,6 +238,7 @@ static const NSCore ns_cores[] = {
 };
 #define NS_ROM_WRAP   0x18109000
 #define NS_NAND_WRAP  0x1811a000
+#define NS_PCIE_WRAP  0x18101000  /* PCIe cores 0-2, 4 KiB apart */
 /* UART clock 125 MHz: OpenWrt on real hardware reports base_baud = 7812500 */
 #define NS_UART_BAUDBASE 7812500
 #define NS_NAND_REGS  0x18028000
@@ -313,6 +318,75 @@ static BCMNSRegInit ns_dmu_init[] = {
      * degC. A unit read 0x24a-0x24d (93-91 degC) over 10 s at idle; 0x24c is
      * 92 degC. Machine property "temperature" (degC) overrides it. */
     { NS_DMU_PVTMON_STATUS, 0x0000024c, 0xffffffff },
+    /* The unit reads the same word at +4 and +8. */
+    { NS_DMU_PVTMON_STATUS + 4, 0x0000024c, 0xffffffff },
+    { NS_DMU_PVTMON_STATUS + 8, 0x0000024c, 0xffffffff },
+    /* Every other non-zero word of 0x000-0x2fc as a BCM47094 unit reads it
+     * after boot (device probe round 2): LCPLL (0x100-0x13c), USB2 PLL
+     * copies, CRU and pad/IO control, straps copies, PVTMON control. The
+     * kernel reads few of them; no behaviour is modelled behind any. */
+    { 0x000, 0x00000008, 0 },
+    { 0x020, 0x0000001b, 0 },
+    { 0x024, 0x00000030, 0 },
+    { 0x02c, 0x00000200, 0 },
+    { 0x100, 0x00e18000, 0 },
+    { 0x104, 0x18000000, 0 },
+    { 0x108, 0x20100819, 0 },
+    { 0x10c, 0x02a00000, 0 },
+    { 0x110, 0x00001000, 0 },
+    { 0x114, 0x00001000, 0 },
+    { 0x118, 0x00001000, 0 },
+    { 0x11c, 0x00001000, 0 },
+    { 0x120, 0x00001000, 0 },
+    { 0x124, 0x00001000, 0 },
+    { 0x128, 0x00001000, 0 },
+    { 0x12c, 0x00001000, 0 },
+    { 0x130, 0x00001000, 0 },
+    { 0x134, 0x00001000, 0 },
+    { 0x138, 0x00001000, 0 },
+    { 0x13c, 0x00001000, 0 },
+    { 0x140, 0x00000ca7, 0 },
+    { 0x168, 0x00dd10c3, 0 },
+    { 0x16c, 0x00dd10c3, 0 },
+    { 0x170, 0x00dd10c3, 0 },
+    { 0x174, 0x00dd10c3, 0 },
+    { 0x178, 0x00dd10c3, 0 },
+    { 0x17c, 0x00dd10c3, 0 },
+    { 0x188, 0x000000f9, 0 },
+    { 0x1c0, 0x001fffff, 0 },
+    { 0x1c8, 0x00ffffff, 0 },
+    { 0x1cc, 0x00ffffff, 0 },
+    { 0x1e0, 0x00ffffff, 0 },
+    { 0x1e4, 0x00ffffff, 0 },
+    { 0x200, 0x000c008f, 0 },
+    { 0x204, 0xe1ff6470, 0 },
+    { 0x208, 0x00004004, 0 },
+    { 0x20c, 0x00004100, 0 },
+    { 0x210, 0x00000004, 0 },
+    { 0x214, 0x00004001, 0 },
+    { 0x218, 0x00004001, 0 },
+    { 0x21c, 0x00004001, 0 },
+    { 0x220, 0x00004001, 0 },
+    { 0x224, 0x00004001, 0 },
+    { 0x228, 0x00004001, 0 },
+    { 0x22c, 0x00004001, 0 },
+    { 0x260, 0x0000008b, 0 },
+    { 0x264, 0x0000008b, 0 },
+    { 0x268, 0x0000008b, 0 },
+    { 0x26c, 0x0000008b, 0 },
+    { 0x270, 0x0000008b, 0 },
+    { 0x274, 0x0000008b, 0 },
+    { 0x278, 0x0000008b, 0 },
+    { 0x27c, 0x0000008b, 0 },
+    { 0x280, 0x00001d00, 0 },
+    { 0x2a4, 0x00053630, 0 },
+    { 0x2a8, 0x00053630, 0 },
+    { 0x2ac, 0x00053630, 0 },
+    { 0x2b0, 0x00053630, 0 },
+    { 0x2b4, 0x00053630, 0 },
+    { 0x2b8, 0x00053630, 0 },
+    { 0x2bc, 0x00053630, 0 },
+    { 0x2c4, 0x001d2003, 0 },
     { UINT32_MAX, 0, 0 },
 };
 
@@ -367,9 +441,12 @@ static void ns_set_temperature(Object *obj, Visitor *v, const char *name,
     }
     /* Smallest status word the kernel's integer formula maps back to t. */
     raw = ((418 - t) * 10000 + 5555) / 5556;
-    ns_dmu_pvtmon()->value = raw;
-    if (ns_dmu) {
-        ns_dmu->regs[NS_DMU_PVTMON_STATUS / 4] = raw;
+    for (BCMNSRegInit *r = ns_dmu_pvtmon();
+         r->offset >= NS_DMU_PVTMON_STATUS && r->offset <= NS_DMU_PVTMON_STATUS + 8; r++) {
+        r->value = raw;
+        if (ns_dmu) {
+            ns_dmu->regs[r->offset / 4] = raw;
+        }
     }
 }
 
@@ -633,6 +710,9 @@ static void ns_init(MachineState *machine, const NSVariant *v)
     qdev_prop_set_uint32(cc, "capabilities", NS_CC_CAPS);
     qdev_prop_set_uint32(cc, "corecontrol", NS_CC_CORECONTROL);
     qdev_prop_set_uint32(cc, "clkdiv", NS_CC_CLKDIV);
+    qdev_prop_set_uint32(cc, "capabilities-ext", NS_CC_CAPS_EXT);
+    qdev_prop_set_uint32(cc, "otpstatus", NS_CC_OTPSTATUS);
+    qdev_prop_set_uint32(cc, "otplayout", NS_CC_OTPLAYOUT);
     qdev_prop_set_uint32(cc, "gpio-pullup-in", v->gpio_pads);
     qdev_prop_set_uint32(cc, "eromptr", NS_EROM_BASE);
     qdev_prop_set_uint32(cc, "watchdog-hz", NS_ALP_HZ);
@@ -657,11 +737,16 @@ static void ns_init(MachineState *machine, const NSVariant *v)
     sysbus_mmio_map(SYS_BUS_DEVICE(idm), 0, BCM_NS_IDM_BASE);
     bcm_ns_idm_set_iostatus(BCM_NS_IDM(idm), NS_ROM_WRAP, 0x1);   /* SISF_NS_BOOTDEV_NAND */
     bcm_ns_idm_set_iostatus(BCM_NS_IDM(idm), NS_NAND_WRAP, 0x1);  /* NAND_RO_CTRL_READY */
+    /* The PCIe cores' clocks are on when the kernel starts (a unit's ioctrl). */
+    for (n = 0; n < ARRAY_SIZE(ns_pcie); n++) {
+        bcm_ns_idm_set_ioctrl(BCM_NS_IDM(idm), NS_PCIE_WRAP + n * 0x1000, 0x1);
+    }
 
     /* NAND controller (nandcore). Its IDM wrapper page overlays the generic
      * IDM so the endian toggle (ioctrl bit 24) reaches the data path. The
      * part is the ESMT F59L1G81 a unit reports (ID C8 D1 80 95 42 7F);
-     * config/acc_control are what CFE leaves programmed. */
+     * The configuration, timing, chip-select and wrapper words are what CFE
+     * leaves programmed on a unit; ID bytes 6-7 read 0x7f there. */
     {
         DeviceState *nand = qdev_new("bcm-ns-nand");
         DriveInfo *dinfo = drive_get(IF_MTD, 0, 0);
@@ -670,10 +755,20 @@ static void ns_init(MachineState *machine, const NSVariant *v)
             qdev_prop_set_drive_err(nand, "drive", blk_by_legacy_dinfo(dinfo),
                                     &error_fatal);
         }
-        qdev_prop_set_uint64(nand, "device-id", 0x7f429580d1c8ULL);
-        qdev_prop_set_uint32(nand, "revision", 0x0601);         /* [assume] v6.1 */
+        qdev_prop_set_uint64(nand, "device-id", 0x7f7f7f429580d1c8ULL);
+        qdev_prop_set_uint32(nand, "revision", 0x80000601);     /* v6.1 */
         qdev_prop_set_uint32(nand, "config-cs0", 0x25152300);
-        qdev_prop_set_uint32(nand, "acc-control-cs0", 0xc0080010);
+        qdev_prop_set_uint32(nand, "acc-control-cs0", 0xc3080010);
+        qdev_prop_set_uint32(nand, "timing1-cs0", 0x7695a56d);
+        qdev_prop_set_uint32(nand, "timing2-cs0", 0x00001eb7);
+        qdev_prop_set_uint32(nand, "acc-control-cs1", 0xd7080010);
+        qdev_prop_set_uint32(nand, "config-cs1", 0x12032200);
+        qdev_prop_set_uint32(nand, "timing1-cs1", 0x7695a56d);
+        qdev_prop_set_uint32(nand, "timing2-cs1", 0x00001eb7);
+        qdev_prop_set_uint32(nand, "cs-select", 0x60000101);
+        qdev_prop_set_uint32(nand, "cs-xor", 0x00000001);
+        qdev_prop_set_uint32(nand, "wrap-ioctrl", 0x00000001);
+        qdev_prop_set_uint32(nand, "wrap-iostatus", 0x00000003);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(nand), &error_fatal);
         s->nand = dinfo ? nand : NULL;
         sysbus_mmio_map(SYS_BUS_DEVICE(nand), 0, NS_NAND_REGS);

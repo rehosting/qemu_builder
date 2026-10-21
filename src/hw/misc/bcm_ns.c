@@ -30,6 +30,8 @@ enum {
     CC_CHIPID           = 0x000,
     CC_CAPABILITIES     = 0x004,
     CC_CORECONTROL      = 0x008,
+    CC_OTPSTATUS        = 0x010,
+    CC_OTPLAYOUT        = 0x01c,
     CC_INTSTATUS        = 0x020,
     CC_INTMASK          = 0x024,
     CC_CHIPCONTROL      = 0x028,
@@ -195,6 +197,8 @@ static uint64_t cc_read(void *opaque, hwaddr addr, unsigned size)
     case CC_CHIPID:           return s->chipid;
     case CC_CAPABILITIES:     return s->capabilities;
     case CC_CORECONTROL:      return s->corecontrol;
+    case CC_OTPSTATUS:        return s->otpstatus;
+    case CC_OTPLAYOUT:        return s->otplayout;
     case CC_INTSTATUS:        return s->intstatus;
     case CC_INTMASK:          return s->intmask;
     case CC_CHIPCONTROL:      return s->chipcontrol;
@@ -248,6 +252,7 @@ static void cc_write(void *opaque, hwaddr addr, uint64_t val64, unsigned size)
     case CC_CLKDIV:           s->clkdiv = val; break;
     case CC_CHIPID: case CC_CAPABILITIES: case CC_CHIPSTATUS:
     case CC_GPIOIN: case CC_CAPABILITIES_EXT: case CC_EROMPTR:
+    case CC_OTPSTATUS: case CC_OTPLAYOUT:
         qemu_log_mask(LOG_GUEST_ERROR, "bcm-ns-chipcommon: write to RO 0x%03"
                       HWADDR_PRIx "\n", addr);
         return;
@@ -457,6 +462,8 @@ static const Property cc_properties[] = {
     DEFINE_PROP_UINT32("capabilities", BCMNSChipCommonState, capabilities, 0),
     DEFINE_PROP_UINT32("capabilities-ext", BCMNSChipCommonState, capabilities_ext, 0),
     DEFINE_PROP_UINT32("chipstatus", BCMNSChipCommonState, chipstatus, 0),
+    DEFINE_PROP_UINT32("otpstatus", BCMNSChipCommonState, otpstatus, 0),
+    DEFINE_PROP_UINT32("otplayout", BCMNSChipCommonState, otplayout, 0),
     DEFINE_PROP_UINT32("eromptr", BCMNSChipCommonState, eromptr, 0),
     DEFINE_PROP_UINT32("gpio-pullup-in", BCMNSChipCommonState, gpio_pullup_in, GPIO_MASK),
     DEFINE_PROP_UINT32("corecontrol", BCMNSChipCommonState, corecontrol_reset, 0),
@@ -541,6 +548,13 @@ void bcm_ns_idm_set_iostatus(BCMNSIDMState *s, hwaddr wrapper_pa, uint32_t val)
     s->iostatus[idm_page(wrapper_pa)] = val;
 }
 
+/* ioctrl as the boot loader leaves it, restored on every reset */
+void bcm_ns_idm_set_ioctrl(BCMNSIDMState *s, hwaddr wrapper_pa, uint32_t val)
+{
+    s->ioctrl_reset[idm_page(wrapper_pa)] = val;
+    s->ioctrl[idm_page(wrapper_pa)] = val;
+}
+
 void bcm_ns_idm_set_oobsel(BCMNSIDMState *s, hwaddr wrapper_pa, uint32_t val)
 {
     s->oobselouta30[idm_page(wrapper_pa)] = val;
@@ -586,7 +600,7 @@ static void idm_reset(DeviceState *dev)
 {
     BCMNSIDMState *s = BCM_NS_IDM(dev);
 
-    memset(s->ioctrl, 0, sizeof(s->ioctrl));
+    memcpy(s->ioctrl, s->ioctrl_reset, sizeof(s->ioctrl));
     memset(s->resetctrl, 0, sizeof(s->resetctrl));
 }
 
