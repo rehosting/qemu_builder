@@ -44,3 +44,4 @@
 11.1.0/0044-panda-asid_changed-on-x86-arm-and-mips.patch
 11.1.0/0045-panda-guest_hypercall-on-penguin-s-hypercall-instruc.patch
 11.1.0/0046-panda-panda_disable_tb_chaining-turns-TB-chaining-of.patch
+11.1.0/0047-plugins-memory-callbacks-before-the-access.patch
