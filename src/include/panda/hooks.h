@@ -21,6 +21,8 @@ void panda_callbacks_after_block_translate(CPUState *cpu, TranslationBlock *tb);
 int32_t panda_callbacks_before_handle_exception(CPUState *cpu, int32_t exception_index);
 /* true: a plugin vetoed the change, leave the old value in place */
 bool panda_callbacks_asid_changed(CPUState *cpu, uint64_t oldval, uint64_t newval);
+/* true: a plugin handled the hypercall and set the guest's registers itself */
+bool panda_callbacks_guest_hypercall(CPUState *cpu);
 
 #else
 
@@ -35,6 +37,10 @@ static inline int32_t panda_callbacks_before_handle_exception(CPUState *cpu,
     return exception_index;
 }
 static inline bool panda_callbacks_asid_changed(CPUState *cpu, uint64_t oldval, uint64_t newval)
+{
+    return false;
+}
+static inline bool panda_callbacks_guest_hypercall(CPUState *cpu)
 {
     return false;
 }
