@@ -25,7 +25,7 @@ bool panda_in_kernel_mode(const CPUState *cpu) {
 #elif defined(TARGET_MIPS)
     return (env->hflags & MIPS_HFLAG_KSU) == MIPS_HFLAG_KM;
 #elif defined(TARGET_LOONGARCH)
-    return (env->CSR_CRMD & 3) == 0;
+    return (env_sys(env)->CSR_CRMD & 3) == 0;
 #elif defined(TARGET_RISCV)
     // RISC-V privilege modes: 0=U-mode, 1=S-mode, 3=M-mode
     // Both supervisor (S) and machine (M) modes are considered kernel mode

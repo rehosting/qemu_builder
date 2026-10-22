@@ -149,7 +149,7 @@ target_ulong panda_current_asid(CPUState *cpu) {
     #endif
   #elif defined(TARGET_LOONGARCH)
     CPUArchState *env = cpu_env(cpu);
-    return (env->CSR_ASID & 0xff);
+    return (env_sys(env)->CSR_ASID & 0xff);
   #else
   #error "panda_current_asid() not implemented for target architecture."
     return 0;
