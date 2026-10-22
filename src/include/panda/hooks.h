@@ -26,6 +26,9 @@ bool panda_callbacks_guest_hypercall(CPUState *cpu);
 /* false after panda_disable_tb_chaining(): every TB returns to cpu_exec, so the block_exec
  * callbacks there run once per TB rather than once per chain */
 bool panda_tb_chaining_enabled(void);
+/* Before each TB lookup: unload plugins that asked to be, and flush the TBs if panda_do_flush_tb()
+ * asked (it leaves the CPU loop, which then looks the TB up again) */
+void panda_callbacks_before_find_fast(void);
 
 #else
 
@@ -43,6 +46,7 @@ static inline bool panda_tb_chaining_enabled(void)
 {
     return true;
 }
+static inline void panda_callbacks_before_find_fast(void) {}
 static inline bool panda_callbacks_asid_changed(CPUState *cpu, uint64_t oldval, uint64_t newval)
 {
     return false;
