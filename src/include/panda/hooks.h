@@ -23,6 +23,9 @@ int32_t panda_callbacks_before_handle_exception(CPUState *cpu, int32_t exception
 bool panda_callbacks_asid_changed(CPUState *cpu, uint64_t oldval, uint64_t newval);
 /* true: a plugin handled the hypercall and set the guest's registers itself */
 bool panda_callbacks_guest_hypercall(CPUState *cpu);
+/* false after panda_disable_tb_chaining(): every TB returns to cpu_exec, so the block_exec
+ * callbacks there run once per TB rather than once per chain */
+bool panda_tb_chaining_enabled(void);
 
 #else
 
@@ -35,6 +38,10 @@ static inline int32_t panda_callbacks_before_handle_exception(CPUState *cpu,
                                                               int32_t exception_index)
 {
     return exception_index;
+}
+static inline bool panda_tb_chaining_enabled(void)
+{
+    return true;
 }
 static inline bool panda_callbacks_asid_changed(CPUState *cpu, uint64_t oldval, uint64_t newval)
 {

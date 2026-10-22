@@ -916,6 +916,11 @@ void panda_disable_tb_chaining(void)
     panda_tb_chaining = false;
 }
 
+bool panda_tb_chaining_enabled(void)
+{
+    return panda_tb_chaining;
+}
+
 #ifdef CONFIG_LLVM
 
 // Enable translating TCG -> LLVM and executing LLVM

@@ -129,6 +129,16 @@ static inline hwaddr get_paddr(CPUState *cpu, uint64_t addr, void *ram_ptr) {
 }
 #endif
 
+// From the TCG plugin bridge, before each instruction insn_translate asked for. Its trampoline
+// is above, so this isn't a MAKE_CALLBACK; the return value has no meaning to the engine.
+int PCB(insn_exec)(CPUState *env, uint64_t pc) {
+    panda_cb_list *plist;
+    for (plist = panda_cbs[PANDA_CB_INSN_EXEC]; plist != NULL; plist = panda_cb_list_next(plist)) {
+        if (plist->enabled) plist->entry.insn_exec(plist->context, env, pc);
+    }
+    return 0;
+}
+
 // From the TCG plugin bridge (contrib/plugins/panda_plugin_interface.c): QEMU plugin memory
 // callbacks run after the access, so only the after_read/after_write callbacks can be served.
 // paddr is -1 when QEMU has no physical address for the access.
