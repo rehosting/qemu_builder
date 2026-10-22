@@ -59,9 +59,10 @@ static void vcpu_mem(unsigned int cpu_index, qemu_plugin_meminfo_t info,
     if (hwaddr_info && qemu_plugin_hwaddr_is_io(hwaddr_info)){
         return;
     }
-    uint64_t paddr = hwaddr_info ? qemu_plugin_hwaddr_phys_addr(hwaddr_info) : (uint64_t) -1;
     bool is_store = qemu_plugin_mem_is_store(info);
     bool is_before = qemu_plugin_mem_is_before(info);
+    uint64_t paddr = hwaddr_info ? qemu_plugin_hwaddr_phys_addr(hwaddr_info)
+                   : is_before ? panda_bridge_virt_to_phys(cpu, vaddr) : (uint64_t) -1;
     // Before a load there is no value; the size is the access's.
     qemu_plugin_mem_value m = qemu_plugin_mem_get_value(info);
     size_t size;

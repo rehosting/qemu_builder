@@ -52,6 +52,11 @@ unsigned panda_bridge_wants(void){
     return wants;
 }
 
+uint64_t panda_bridge_virt_to_phys(CPUState *cpu, uint64_t vaddr){
+    hwaddr pa = panda_virt_to_phys(cpu, vaddr);
+    return pa == (hwaddr) -1 ? (uint64_t) -1 : (uint64_t) pa;
+}
+
 int panda_memcb_rw(bool is_store){
     int rw = 0;
     if (is_store ? panda_has_callback_registered(PANDA_CB_VIRT_MEM_BEFORE_WRITE)
