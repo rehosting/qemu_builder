@@ -405,11 +405,12 @@ void panda_setup_signal_handling(void (*sigfun) (int, void*, void *));
  *
  * If setting up an environment to run code or rehost some embedded
  * system, this function can be used to set up regions in the
- * machine's memory map.  RAM only, at present.
+ * machine's memory map.  RAM only, at present.  @name must be unique (it names the RAM in
+ * snapshots).  Safe from a vCPU callback (takes the BQL if needed).
  *
- * XXX: Rename as panda_map_memory? 
+ * Return: 0, or -1 if the region could not be made (the reason is reported).
  */
-void map_memory(char* name, uint64_t size, uint64_t address);
+int map_memory(char* name, uint64_t size, uint64_t address);
 
 // REDEFINITIONS below here from monitor.h
 

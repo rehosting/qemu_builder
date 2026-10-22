@@ -10,6 +10,9 @@
 // for map_memory
 #include "qapi/error.h"
 #include "migration/vmstate.h"
+#include "qemu/main-loop.h"
+#include "system/memory.h"
+#include "system/address-spaces.h"
 
 // for panda_{set/get}_library_mode
 #include "qemu/osdep.h"
@@ -216,32 +219,29 @@ void panda_setup_signal_handling(void (*f) (int, void*, void *))
     panda_external_signal_handler = (void(*)(int,siginfo_t*,void*)) f;
 }
 
-// Taken from Avatar2's Configurable Machine - see hw/avatar/configurable_machine.c
-// void map_memory(char* name, uint64_t size, uint64_t address) {
-//     //const char * name; /// XXX const?
-//     MemoryRegion * ram;
-//     bool is_rom = false; // For now, only ram
+// Taken from Avatar2's Configurable Machine (hw/avatar/configurable_machine.c), as wrapup-rebase
+// (6b2103e, 2b5b2db) restored it. memory_region_init_ram registers the RAM for snapshots itself.
+// Takes the BQL if the caller (a vCPU callback) doesn't hold it.
+int map_memory(char *name, uint64_t size, uint64_t address) {
+    Error *err = NULL;
+    bool locked = bql_locked();
+    MemoryRegion *ram = g_new(MemoryRegion, 1);
 
-//     // Get memory from system. XXX may be unsafe to run too early (before machine_init)
-//     MemoryRegion *sysmem = get_system_memory();
-
-//     // Make memory region and initialize
-//     ram =  g_new(MemoryRegion, 1);
-//     g_assert(ram);
-
-//     if(!is_rom) {
-//         memory_region_init_ram(ram, NULL, name, size, &error_fatal);
-//     } else {
-//         memory_region_init_rom(ram, NULL, name, size, &error_fatal);
-//     }
-//     vmstate_register_ram(ram, NULL);
-
-//     printf("Adding memory region %s (size: 0x%"
-//            PRIx64 ") at address 0x%" PRIx64 "\n", name, size, address);
-
-//     // Add memory region to sysmem
-//     memory_region_add_subregion(sysmem, address, ram);
-// }
+    if (!locked) {
+        bql_lock();
+    }
+    memory_region_init_ram(ram, NULL, name, size, &err);
+    if (err) {
+        error_reportf_err(err, "map_memory %s: ", name);
+        g_free(ram);
+    } else {
+        memory_region_add_subregion(get_system_memory(), address, ram);
+    }
+    if (!locked) {
+        bql_unlock();
+    }
+    return err ? -1 : 0;
+}
 
 CPUState* get_cpu(void) {
   return current_cpu;
