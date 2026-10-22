@@ -101,8 +101,15 @@ static hwaddr phys_page_debug(CPUState *env, target_ulong page)
 hwaddr panda_virt_to_phys(CPUState *env, target_ulong addr) {
     target_ulong page;
     hwaddr phys_addr;
+    bool changed_priv = false;
     page = addr & TARGET_PAGE_MASK;
     phys_addr = phys_page_debug(env, page);
+    // As panda_virtual_memory_rw: a kernel address translated from user mode (arm64 EL0
+    // can't see TTBR1's mappings) needs privileged mode.
+    if (phys_addr == -1 && (changed_priv = enter_priv(env))) {
+        phys_addr = phys_page_debug(env, page);
+        exit_priv(env);
+    }
     if (phys_addr == -1) {
         // no physical page mapped
         return -1;
