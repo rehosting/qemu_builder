@@ -54,15 +54,23 @@ static void insn_exec(unsigned int cpu_index, void *udata)
 static void vcpu_mem(unsigned int cpu_index, qemu_plugin_meminfo_t info,
                      uint64_t vaddr, void *udata){
     CPUState *cpu = panda_cpu_by_index(cpu_index);
-    struct qemu_plugin_hwaddr *hwaddr_info = qemu_plugin_get_hwaddr(info, vaddr);
-    // MMIO accesses have no RAM behind them; mmio_after_read is not served from here yet.
-    if (hwaddr_info && qemu_plugin_hwaddr_is_io(hwaddr_info)){
-        return;
-    }
     bool is_store = qemu_plugin_mem_is_store(info);
     bool is_before = qemu_plugin_mem_is_before(info);
-    uint64_t paddr = hwaddr_info ? qemu_plugin_hwaddr_phys_addr(hwaddr_info)
-                   : is_before ? panda_bridge_virt_to_phys(cpu, vaddr) : (uint64_t) -1;
+    uint64_t paddr = (uint64_t) -1;
+    if (!is_before) {
+        struct qemu_plugin_hwaddr *hwaddr_info = qemu_plugin_get_hwaddr(info, vaddr);
+        // MMIO accesses have no RAM behind them; mmio_after_read is not served from here yet.
+        if (hwaddr_info && qemu_plugin_hwaddr_is_io(hwaddr_info)) {
+            return;
+        }
+        if (hwaddr_info) {
+            paddr = qemu_plugin_hwaddr_phys_addr(hwaddr_info);
+        }
+    } else if (panda_memcb_phys_before(is_store)) {
+        // Before the access its page may not be in the TLB, where the plugin API looks (and
+        // complains if it isn't): walk the page tables, and only for a phys callback.
+        paddr = panda_bridge_virt_to_phys(cpu, vaddr);
+    }
     // Before a load there is no value; the size is the access's.
     qemu_plugin_mem_value m = qemu_plugin_mem_get_value(info);
     size_t size;

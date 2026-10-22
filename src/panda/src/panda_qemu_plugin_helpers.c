@@ -74,6 +74,11 @@ int panda_memcb_rw(bool is_store){
     return rw ? rw | (is_store ? QEMU_PLUGIN_MEM_W : QEMU_PLUGIN_MEM_R) : 0;
 }
 
+bool panda_memcb_phys_before(bool is_store){
+    return panda_has_callback_registered(is_store ? PANDA_CB_PHYS_MEM_BEFORE_WRITE
+                                                  : PANDA_CB_PHYS_MEM_BEFORE_READ);
+}
+
 #define PANDA_END_SLOTS 1024
 static TranslationBlock *pending_end[PANDA_END_SLOTS];
 

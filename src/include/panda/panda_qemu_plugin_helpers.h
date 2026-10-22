@@ -16,6 +16,8 @@ int panda_memcb_rw(bool is_store);
 /* The physical address of @vaddr by a page walk, or -1: for a before-access event, whose page
  * may not be in the TLB yet (the plugin API then has no hwaddr). */
 uint64_t panda_bridge_virt_to_phys(CPUState *cpu, uint64_t vaddr);
+/* Is a phys_mem_before_read (is_store false) or _write callback registered? */
+bool panda_memcb_phys_before(bool is_store);
 /* end_block_exec runs after a block's last instruction. QEMU has no hook there, so the block a vCPU
  * starts is kept pending (panda_end_block_defer, from the bridge's block start) and its
  * end_block_exec runs at whatever the vCPU does next (panda_end_block_flush): start another block,
