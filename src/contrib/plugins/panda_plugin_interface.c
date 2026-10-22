@@ -35,20 +35,20 @@ static void end_block_exec_cb(unsigned int cpu_index, void *udata)
 
 static void insn_exec(unsigned int cpu_index, void *udata)
 {
-    // CPUState *cpu = panda_cpu_by_index(cpu_index);
-    // panda_callbacks_insn_exec(cpu, (uint64_t) udata);
+    CPUState *cpu = panda_cpu_by_index(cpu_index);
+    panda_callbacks_insn_exec(cpu, (uint64_t) udata);
 }
 
-#ifdef TODO_LATER
+// udata is the accessing instruction's pc.
 static void vcpu_mem(unsigned int cpu_index, qemu_plugin_meminfo_t info,
                      uint64_t vaddr, void *udata){
     CPUState *cpu = panda_cpu_by_index(cpu_index);
-    struct qemu_plugin_hwaddr* hwaddr_info = qemu_plugin_get_hwaddr(info, vaddr);
-    uint64_t hwaddr;
-    if (hwaddr_info){
-        hwaddr = qemu_plugin_hwaddr_phys_addr(hwaddr_info);
+    struct qemu_plugin_hwaddr *hwaddr_info = qemu_plugin_get_hwaddr(info, vaddr);
+    // MMIO accesses have no RAM behind them; mmio_after_read is not served from here yet.
+    if (hwaddr_info && qemu_plugin_hwaddr_is_io(hwaddr_info)){
+        return;
     }
-    bool is_store = qemu_plugin_mem_is_store(info);
+    uint64_t paddr = hwaddr_info ? qemu_plugin_hwaddr_phys_addr(hwaddr_info) : (uint64_t) -1;
     qemu_plugin_mem_value m = qemu_plugin_mem_get_value(info);
     size_t size;
     void *data;
@@ -77,22 +77,9 @@ static void vcpu_mem(unsigned int cpu_index, qemu_plugin_meminfo_t info,
         default:
             assert(false);
     }
-
-    if (hwaddr_info && qemu_plugin_hwaddr_is_io(hwaddr_info)){
-        // panda_callbacks_mmio_after_read(cpu, hwaddr, vaddr, size, data);
-    }
-
-    if (is_store){
-        if (hwaddr_info)
-            panda_callbacks_phys_mem_after_write(cpu, hwaddr, size, data);
-        panda_callbacks_virt_mem_after_write(cpu, vaddr, size, data);
-    }else{
-        if (hwaddr_info)
-            panda_callbacks_phys_mem_after_read(cpu, hwaddr, size, data);
-        panda_callbacks_virt_mem_after_read(cpu, vaddr, size, data);
-    }
+    panda_callbacks_mem_after_access(cpu, (uint64_t) udata, vaddr, paddr, size, data,
+                                     qemu_plugin_mem_is_store(info));
 }
-#endif
 
 
 static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
@@ -102,23 +89,21 @@ static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
     struct qemu_plugin_insn *insn;
     CPUState *cpu = panda_cpu_in_translate();
 
-    uint64_t pc = qemu_plugin_tb_vaddr(tb);
-    // printf("tb_trans %" PRIu64 "\n", pc);
 
     n_insns = qemu_plugin_tb_n_insns(tb);
+    // Memory callbacks are instrumented at translation: enabling one needs a tb flush.
+    int memcb_status = panda_get_memcb_status();
     for (size_t i=0; i<n_insns; i++){
         insn = qemu_plugin_tb_get_insn(tb, i);
-        if (unlikely(panda_callbacks_insn_translate(cpu, pc))){
-            qemu_plugin_register_vcpu_insn_exec_cb(insn, insn_exec, QEMU_PLUGIN_CB_NO_REGS, (void*)qemu_plugin_insn_vaddr(insn));
+        uint64_t insn_pc = qemu_plugin_insn_vaddr(insn);
+        if (unlikely(panda_callbacks_insn_translate(cpu, insn_pc))){
+            qemu_plugin_register_vcpu_insn_exec_cb(insn, insn_exec, QEMU_PLUGIN_CB_NO_REGS, (void*)insn_pc);
         }
-#ifdef TODO_LATER
-        int memcb_status =  panda_get_memcb_status();
         if (memcb_status){
             qemu_plugin_register_vcpu_mem_cb(insn, vcpu_mem,
                                              QEMU_PLUGIN_CB_NO_REGS,
-                                             (enum qemu_plugin_mem_rw) memcb_status, NULL);
+                                             (enum qemu_plugin_mem_rw) memcb_status, (void*)insn_pc);
         }
-#endif
     }
 
     // install before_block_exec
