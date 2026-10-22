@@ -1,5 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Luke Craig <luke.craig@ll.mit.edu>
+From: Luke Craig <lacraig3@gmail.com>
 Date: Wed, 21 Oct 2026 16:14:04 -0400
 Subject: [PATCH] i386/kvm: plugin accesses on KVM: kernel walk, declined
  breakpoints, full register sync
