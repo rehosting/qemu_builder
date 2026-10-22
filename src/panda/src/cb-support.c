@@ -11,6 +11,7 @@
 
 // For each callback, use MAKE_CALLBACK or MAKE_REPLAY_ONLY_CALLBACK as defined in
 #include "panda/callbacks/cb-macros.h"
+#include "panda/panda_qemu_plugin_helpers.h"
 #include "panda/callbacks/cb-trampolines.h"
 #include "exec/tb-flush.h"
 
@@ -50,9 +51,18 @@ MAKE_CALLBACK(void, BEFORE_TCG_CODEGEN, before_tcg_codegen, CPUState*, cpu, Tran
 MAKE_CALLBACK(void, BEFORE_BLOCK_EXEC, before_block_exec,
                     CPUState*, cpu, TranslationBlock*, tb);
 
-MAKE_CALLBACK(void, AFTER_BLOCK_EXEC, after_block_exec,
-                    CPUState*, cpu, TranslationBlock*, tb,
-                    uint8_t, exitCode);
+// Not macroized: the block that ran last ends first (panda_end_block_flush).
+void PCB(after_block_exec)(CPUState *cpu, TranslationBlock *tb, uint8_t exitCode) {
+    panda_cb_list *plist;
+    panda_end_block_flush(cpu);
+    for (plist = panda_cbs[PANDA_CB_AFTER_BLOCK_EXEC]; plist != NULL; plist = panda_cb_list_next(plist)) {
+        if (plist->enabled)
+            plist->entry.after_block_exec(plist->context, cpu, tb, exitCode);
+    }
+}
+void panda_cb_trampoline_after_block_exec(void* context, CPUState *cpu, TranslationBlock *tb, uint8_t exitCode) {
+    (*(panda_cb*)context).after_block_exec(cpu, tb, exitCode);
+}
 
 MAKE_CALLBACK(void, BEFORE_BLOCK_TRANSLATE, before_block_translate,
                     CPUState*, cpu, uint64_t, pc);
@@ -319,6 +329,7 @@ int32_t PCB(before_handle_exception)(CPUState *cpu, int32_t exception_index) {
     bool got_new_exception = false;
     int32_t new_exception;
 
+    panda_end_block_flush(cpu);     // the block the exception left
     for (plist = panda_cbs[PANDA_CB_BEFORE_HANDLE_EXCEPTION]; plist != NULL;
          plist = panda_cb_list_next(plist)) {
         if (plist->enabled) {

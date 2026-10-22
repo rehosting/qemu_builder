@@ -19,18 +19,29 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 QEMU_PLUGIN_EXPORT int (*external_plugin_install)(qemu_plugin_id_t id, const qemu_info_t *info,int argc, char **argv);
 
 
-static void start_block_exec_cb(unsigned int cpu_index, void *udata)
+// A block starts: the one before it ends (see panda_end_block_defer), its start_block_exec runs
+// (which may leave it), and, if anyone wants its end (END_TAG in udata, the TB pointer's low bit),
+// it becomes the pending one.
+#define END_TAG 1
+static void block_start_cb(unsigned int cpu_index, void *udata)
 {
-    // printf("start_block_exec  %d %p\n", cpu_index, udata);
     CPUState *cpu = panda_cpu_by_index(cpu_index);
-    panda_callbacks_start_block_exec(cpu, (TranslationBlock*) udata);
+    TranslationBlock *tb = (TranslationBlock *) ((uintptr_t) udata & ~(uintptr_t) END_TAG);
+    panda_end_block_flush(cpu);
+    panda_callbacks_start_block_exec(cpu, tb);
+    if ((uintptr_t) udata & END_TAG) {
+        panda_end_block_defer(cpu, tb);
+    }
 }
 
-static void end_block_exec_cb(unsigned int cpu_index, void *udata)
+static void vcpu_idle_or_exit(unsigned int cpu_index, void *userdata)
 {
-    // printf("end_block_exec  %d %p\n", cpu_index, udata);
-    CPUState *cpu = panda_cpu_by_index(cpu_index);
-    panda_callbacks_end_block_exec(cpu, (TranslationBlock*) udata);
+    panda_end_block_flush(panda_cpu_by_index(cpu_index));
+}
+
+static void code_flushed(void *userdata)
+{
+    panda_end_block_drop_all();
 }
 
 static void insn_exec(unsigned int cpu_index, void *udata)
@@ -116,14 +127,10 @@ static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
     }
 
     TranslationBlock *real_tb = panda_get_tb(tb);
-    if (wants & PANDA_BRIDGE_START_BLOCK) {
-        qemu_plugin_register_vcpu_tb_exec_cb(tb, start_block_exec_cb, QEMU_PLUGIN_CB_RW_REGS,
-                                             (void *) real_tb);
-    }
-    if (wants & PANDA_BRIDGE_END_BLOCK) {
-        qemu_plugin_register_vcpu_insn_exec_cb(qemu_plugin_tb_get_insn(tb, n_insns - 1),
-                                               end_block_exec_cb, QEMU_PLUGIN_CB_RW_REGS,
-                                               (void *) real_tb);
+    if (wants & (PANDA_BRIDGE_START_BLOCK | PANDA_BRIDGE_END_BLOCK)) {
+        uintptr_t tag = (wants & PANDA_BRIDGE_END_BLOCK) ? END_TAG : 0;
+        qemu_plugin_register_vcpu_tb_exec_cb(tb, block_start_cb, QEMU_PLUGIN_CB_RW_REGS,
+                                             (void *) ((uintptr_t) real_tb | tag));
     }
 
     panda_callbacks_block_translate(cpu, tb);
@@ -143,7 +150,8 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
                         int argc, char **argv)
 {
     qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans, NULL);
-    // qemu_plugin_register_vcpu_init_cb(id, vcpu_init);
-    // qemu_plugin_register_vcpu_exit_cb(id, vcpu_exit);
+    qemu_plugin_register_vcpu_idle_cb(id, vcpu_idle_or_exit, NULL);
+    qemu_plugin_register_vcpu_exit_cb(id, vcpu_idle_or_exit, NULL);
+    qemu_plugin_register_flush_cb(id, code_flushed, NULL);
     return 0;
 }

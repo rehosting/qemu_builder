@@ -1,10 +1,12 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "panda/debug.h"
 #include "panda/plugin.h"
 #include "panda/common.h"
+#include "panda/callbacks/cb-support.h"
 #include "exec/translator.h"
 #include "panda/panda_qemu_plugin_helpers.h"
 
@@ -65,4 +67,29 @@ int panda_memcb_rw(bool is_store){
         rw |= QEMU_PLUGIN_MEM_AFTER;
     }
     return rw ? rw | (is_store ? QEMU_PLUGIN_MEM_W : QEMU_PLUGIN_MEM_R) : 0;
+}
+
+#define PANDA_END_SLOTS 1024
+static TranslationBlock *pending_end[PANDA_END_SLOTS];
+
+void panda_end_block_flush(CPUState *cpu){
+    if (cpu->cpu_index < PANDA_END_SLOTS) {
+        TranslationBlock *tb = pending_end[cpu->cpu_index];
+        if (unlikely(tb)) {
+            pending_end[cpu->cpu_index] = NULL;
+            panda_callbacks_end_block_exec(cpu, tb);
+        }
+    }
+}
+
+void panda_end_block_defer(CPUState *cpu, TranslationBlock *tb){
+    if (cpu->cpu_index < PANDA_END_SLOTS) {
+        pending_end[cpu->cpu_index] = tb;
+    } else {
+        panda_callbacks_end_block_exec(cpu, tb);   // no slot: before the block, as it used to
+    }
+}
+
+void panda_end_block_drop_all(void){
+    memset(pending_end, 0, sizeof(pending_end));
 }
