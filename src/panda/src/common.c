@@ -432,8 +432,31 @@ void exit_priv(CPUState *cpu){
     in_fake_priv = false;
 }
 
+#elif defined(TARGET_RISCV)
+
+// The debug page walk checks U against the CPU's privilege (riscv_env_mmu_index): from U-mode,
+// kernel pages are refused. Walk as S-mode; env->priv only, no mode switch, so no TLB flush.
+thread_local privilege_mode_t saved_priv;
+thread_local bool in_fake_priv = false;
+bool enter_priv(CPUState *cpu){
+    CPURISCVState *env = (CPURISCVState *)cpu_env(cpu);
+    if (env->priv != PRV_U) {
+        return false;
+    }
+    saved_priv = env->priv;
+    env->priv = PRV_S;
+    in_fake_priv = true;
+    return true;
+}
+
+void exit_priv(CPUState *cpu){
+    assert(in_fake_priv && "exit called when not faked");
+    ((CPURISCVState *)cpu_env(cpu))->priv = saved_priv;
+    in_fake_priv = false;
+}
+
 #else
-// Non-ARM architectures don't require special permissions for PANDA's memory access fns
+// Other architectures don't require special permissions for PANDA's memory access fns
 bool enter_priv(CPUState* cpu) {return false;};
 void exit_priv(CPUState* cpu)  {};
 #endif
