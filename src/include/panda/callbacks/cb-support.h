@@ -70,9 +70,9 @@ void panda_callbacks_mem_after_read(CPUState *env, uint64_t pc, uint64_t addr, s
 void panda_callbacks_mem_before_write(CPUState *env, uint64_t pc, uint64_t addr, size_t data_size, uint64_t val, void *ram_ptr);
 void panda_callbacks_mem_after_write(CPUState *env, uint64_t pc, uint64_t addr, size_t data_size, uint64_t val, void *ram_ptr);
 
-/* invoked from the TCG plugin bridge, after the access */
-void panda_callbacks_mem_after_access(CPUState *env, uint64_t pc, uint64_t addr, uint64_t paddr,
-                                      size_t size, uint8_t *buf, bool is_store);
+/* invoked from the TCG plugin bridge, before or after the access */
+void panda_callbacks_mem_access(CPUState *env, uint64_t pc, uint64_t addr, uint64_t paddr,
+                                size_t size, uint8_t *buf, bool is_store, bool is_before);
 
 /* invoked from cpu-exec.c */
 void panda_callbacks_before_find_fast(void);

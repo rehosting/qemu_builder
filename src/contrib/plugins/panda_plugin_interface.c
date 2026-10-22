@@ -49,6 +49,9 @@ static void vcpu_mem(unsigned int cpu_index, qemu_plugin_meminfo_t info,
         return;
     }
     uint64_t paddr = hwaddr_info ? qemu_plugin_hwaddr_phys_addr(hwaddr_info) : (uint64_t) -1;
+    bool is_store = qemu_plugin_mem_is_store(info);
+    bool is_before = qemu_plugin_mem_is_before(info);
+    // Before a load there is no value; the size is the access's.
     qemu_plugin_mem_value m = qemu_plugin_mem_get_value(info);
     size_t size;
     void *data;
@@ -77,45 +80,51 @@ static void vcpu_mem(unsigned int cpu_index, qemu_plugin_meminfo_t info,
         default:
             assert(false);
     }
-    panda_callbacks_mem_after_access(cpu, (uint64_t) udata, vaddr, paddr, size, data,
-                                     qemu_plugin_mem_is_store(info));
+    panda_callbacks_mem_access(cpu, (uint64_t) udata, vaddr, paddr, size, data, is_store, is_before);
 }
 
 
+// Instruments only for the PANDA callbacks registered (panda_bridge_wants): with none, a TB gets
+// no callbacks and its address is never read, so a CF_PCREL TB stays shared between the virtual
+// addresses that map it. Callbacks get synced registers (RW_REGS): PANDA plugins read and write
+// the CPU state directly.
 static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
 {
-    struct qemu_plugin_insn *last_instr;
-    size_t n_insns;
-    struct qemu_plugin_insn *insn;
     CPUState *cpu = panda_cpu_in_translate();
+    unsigned wants = panda_bridge_wants();
+    int mem_rw[2] = { panda_memcb_rw(false), panda_memcb_rw(true) };
+    size_t n_insns = qemu_plugin_tb_n_insns(tb);
 
-
-    n_insns = qemu_plugin_tb_n_insns(tb);
-    // Memory callbacks are instrumented at translation: enabling one needs a tb flush.
-    int memcb_status = panda_get_memcb_status();
-    for (size_t i=0; i<n_insns; i++){
-        insn = qemu_plugin_tb_get_insn(tb, i);
-        uint64_t insn_pc = qemu_plugin_insn_vaddr(insn);
-        if (unlikely(panda_callbacks_insn_translate(cpu, insn_pc))){
-            qemu_plugin_register_vcpu_insn_exec_cb(insn, insn_exec, QEMU_PLUGIN_CB_NO_REGS, (void*)insn_pc);
-        }
-        if (memcb_status){
-            qemu_plugin_register_vcpu_mem_cb(insn, vcpu_mem,
-                                             QEMU_PLUGIN_CB_NO_REGS,
-                                             (enum qemu_plugin_mem_rw) memcb_status, (void*)insn_pc);
+    if (wants & PANDA_BRIDGE_TB_PC) {
+        qemu_plugin_tb_vaddr(tb);   // binds the TB to its address (patch 0035): tb->pc is right
+    }
+    if ((wants & PANDA_BRIDGE_INSN) || mem_rw[0] || mem_rw[1]) {
+        for (size_t i = 0; i < n_insns; i++) {
+            struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
+            uint64_t insn_pc = qemu_plugin_insn_vaddr(insn);
+            if ((wants & PANDA_BRIDGE_INSN) && panda_callbacks_insn_translate(cpu, insn_pc)) {
+                qemu_plugin_register_vcpu_insn_exec_cb(insn, insn_exec, QEMU_PLUGIN_CB_RW_REGS,
+                                                       (void *) insn_pc);
+            }
+            for (int s = 0; s < 2; s++) {
+                if (mem_rw[s]) {
+                    qemu_plugin_register_vcpu_mem_cb(insn, vcpu_mem, QEMU_PLUGIN_CB_RW_REGS,
+                                                     (enum qemu_plugin_mem_rw) mem_rw[s], (void *) insn_pc);
+                }
+            }
         }
     }
 
-    // install before_block_exec
     TranslationBlock *real_tb = panda_get_tb(tb);
-    qemu_plugin_register_vcpu_tb_exec_cb(tb, start_block_exec_cb,
-                                        QEMU_PLUGIN_CB_NO_REGS,
-                                         (void *)real_tb);
-    
-    // install after_block_exec
-    last_instr = qemu_plugin_tb_get_insn(tb, n_insns - 1);
-    qemu_plugin_register_vcpu_insn_exec_cb(last_instr, end_block_exec_cb,
-                                QEMU_PLUGIN_CB_NO_REGS, (void *)real_tb);
+    if (wants & PANDA_BRIDGE_START_BLOCK) {
+        qemu_plugin_register_vcpu_tb_exec_cb(tb, start_block_exec_cb, QEMU_PLUGIN_CB_RW_REGS,
+                                             (void *) real_tb);
+    }
+    if (wants & PANDA_BRIDGE_END_BLOCK) {
+        qemu_plugin_register_vcpu_insn_exec_cb(qemu_plugin_tb_get_insn(tb, n_insns - 1),
+                                               end_block_exec_cb, QEMU_PLUGIN_CB_RW_REGS,
+                                               (void *) real_tb);
+    }
 
     panda_callbacks_block_translate(cpu, tb);
 }

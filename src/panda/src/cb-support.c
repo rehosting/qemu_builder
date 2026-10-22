@@ -139,13 +139,28 @@ int PCB(insn_exec)(CPUState *env, uint64_t pc) {
     return 0;
 }
 
-// From the TCG plugin bridge (contrib/plugins/panda_plugin_interface.c): QEMU plugin memory
-// callbacks run after the access, so only the after_read/after_write callbacks can be served.
-// paddr is -1 when QEMU has no physical address for the access.
-void PCB(mem_after_access)(CPUState *env, uint64_t pc, uint64_t addr, uint64_t paddr,
-                           size_t size, uint8_t *buf, bool is_store) {
+// From the TCG plugin bridge (contrib/plugins/panda_plugin_interface.c). paddr is -1 when QEMU
+// has no physical address for the access; buf is the value stored or loaded (none before a load).
+void PCB(mem_access)(CPUState *env, uint64_t pc, uint64_t addr, uint64_t paddr,
+                     size_t size, uint8_t *buf, bool is_store, bool is_before) {
     panda_cb_list *plist;
-    if (is_store) {
+    if (is_before && is_store) {
+        for (plist = panda_cbs[PANDA_CB_VIRT_MEM_BEFORE_WRITE]; plist != NULL; plist = panda_cb_list_next(plist)) {
+            if (plist->enabled) plist->entry.virt_mem_before_write(plist->context, env, pc, addr, size, buf);
+        }
+        if (paddr == -1) return;
+        for (plist = panda_cbs[PANDA_CB_PHYS_MEM_BEFORE_WRITE]; plist != NULL; plist = panda_cb_list_next(plist)) {
+            if (plist->enabled) plist->entry.phys_mem_before_write(plist->context, env, pc, paddr, size, buf);
+        }
+    } else if (is_before) {
+        for (plist = panda_cbs[PANDA_CB_VIRT_MEM_BEFORE_READ]; plist != NULL; plist = panda_cb_list_next(plist)) {
+            if (plist->enabled) plist->entry.virt_mem_before_read(plist->context, env, pc, addr, size);
+        }
+        if (paddr == -1) return;
+        for (plist = panda_cbs[PANDA_CB_PHYS_MEM_BEFORE_READ]; plist != NULL; plist = panda_cb_list_next(plist)) {
+            if (plist->enabled) plist->entry.phys_mem_before_read(plist->context, env, pc, paddr, size);
+        }
+    } else if (is_store) {
         for (plist = panda_cbs[PANDA_CB_VIRT_MEM_AFTER_WRITE]; plist != NULL; plist = panda_cb_list_next(plist)) {
             if (plist->enabled) plist->entry.virt_mem_after_write(plist->context, env, pc, addr, size, buf);
         }
