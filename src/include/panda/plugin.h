@@ -363,6 +363,33 @@ void panda_memsavep(FILE *file);
 
 int panda_vm_quit(void);
 
+/* Record/replay control (panda/src/rr_control.c): requests, carried out from the main loop. */
+typedef enum RRCTRL_ret {
+    RRCTRL_EPENDING = -2,   /* another request is pending */
+    RRCTRL_EINVALID = -1,   /* not valid in the current record/replay state */
+    RRCTRL_OK = 0,
+} RRCTRL_ret;
+
+/**
+ * panda_record_begin() - Start recording.
+ * @name: recording name: the log is <name>-rr-nondet.log, the start point the internal snapshot
+ *        "rr-<basename of name>" in the disk image.
+ * @snapshot: revert to this snapshot first, or NULL.
+ */
+int panda_record_begin(const char *name, const char *snapshot);
+/* panda_record_end() - End the recording; the VM keeps running. */
+int panda_record_end(void);
+/**
+ * panda_replay_begin() - Replay recording @name from its start snapshot. Use the recording's
+ * command line (same machine and disk image).
+ */
+int panda_replay_begin(const char *name);
+/* panda_replay_end() - Stop the replay; this ends the run. */
+int panda_replay_end(void);
+bool rr_in_record(void);
+bool rr_in_replay(void);
+bool rr_on(void);
+
 // Not and API function.
 char* panda_get_rr_name(void);
 

@@ -7,6 +7,7 @@ specific_ss.add(
         'panda_arch.c',
         'panda_mem.c',
         'panda_qemu_plugin_helpers.c',
+        'rr_control.c',
         'wrap_ops.c',
     )
 )

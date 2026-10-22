@@ -1008,63 +1008,6 @@ int panda_vm_quit(void) {
 
 
 /**
- * @brief Starts recording a PANDA trace. If \p snapshot is not NULL,
- * then the VM state will be reverted to the specified snapshot before
- * starting recording.
- */
-int panda_record_begin(const char *name, const char *snapshot) {
-    if (rr_on())
-        return RRCTRL_EINVALID;
-    if (rr_control.next != RR_NOCHANGE)
-        return RRCTRL_EPENDING;
-
-    rr_control.next = RR_RECORD;
-    rr_control.name = g_strdup(name);
-    rr_control.snapshot = (snapshot != NULL) ? g_strdup(snapshot) : NULL;
-    return RRCTRL_OK;
-}
-
-/**
- * @brief Ends current PANDA recording.
- */
-int panda_record_end(void) {
-    if (!rr_in_record())
-        return RRCTRL_EINVALID;
-    if (rr_control.next != RR_NOCHANGE)
-        return RRCTRL_EPENDING;
-
-    rr_control.next = RR_OFF;
-    return RRCTRL_OK;
-}
-
-/**
- * @brief Starts replaying the specified PANDA trace.
- */
-int panda_replay_begin(const char *name) {
-    if (rr_on())
-        return RRCTRL_EINVALID;
-    if (rr_control.next != RR_NOCHANGE)
-        return RRCTRL_EPENDING;
-
-    rr_control.next = RR_REPLAY;
-    rr_control.name = g_strdup(name);
-    return RRCTRL_OK;
-}
-
-/**
- * @brief Stops the currently running PANDA replay.
- */
-int panda_replay_end(void) {
-    if (!rr_in_replay())
-        return RRCTRL_EINVALID;
-    if (rr_control.next != RR_NOCHANGE)
-        return RRCTRL_EPENDING;
-
-    rr_control.next = RR_OFF;
-    return RRCTRL_OK;
-}
-
-/**
  * @brief Return the name of the current PANDA record/replay
  * 
  * @return char* 
