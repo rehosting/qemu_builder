@@ -42,3 +42,4 @@
 11.1.0/0042-plugins-add-qemu_plugin_tb_size-and-qemu_plugin_tb_g.patch
 11.1.0/0043-panda-TCG-core-hooks.patch
 11.1.0/0044-panda-asid_changed-on-x86-arm-and-mips.patch
+11.1.0/0045-panda-guest_hypercall-on-penguin-s-hypercall-instruc.patch
