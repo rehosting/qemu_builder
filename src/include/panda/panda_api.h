@@ -65,6 +65,16 @@ void panda_cont(void);
  */
 void panda_main_loop_kick(void);
 
+/**
+ * panda_mark_hook_address() - Instrumentation keyed by a guest virtual address will be at @pc.
+ *
+ * Code on @pc's virtual page is then translated for its virtual address (no CF_PCREL sharing),
+ * and blocks already translated there are invalidated, so a decision made at translation time
+ * (the hooks plugin: "is there a hook in this block?") is never reused at another mapping of the
+ * same code, nor kept from before the hook. Callable from any thread.
+ */
+void panda_mark_hook_address(target_ulong pc);
+
 
 /**
  * panda_fast_snap() - Snapshot RAM and device state in host memory (prototype).
