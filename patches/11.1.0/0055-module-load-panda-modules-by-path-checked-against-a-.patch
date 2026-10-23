@@ -30,8 +30,8 @@ check in place of the probe's none.
 ---
  include/qemu/module.h |  12 +++++
  meson.build           |  21 +++++++-
- util/module.c         | 116 ++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 148 insertions(+), 1 deletion(-)
+ util/module.c         | 118 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 150 insertions(+), 1 deletion(-)
 
 diff --git a/include/qemu/module.h b/include/qemu/module.h
 index fccf017bf9e805adf03944433d59eecbf2f453ed..386b18b46aa67d2657d2dd229b53ae9a6d5c3576 100644
@@ -102,7 +102,7 @@ index 1578cee627b4ebd95c24b3ae1a06f96877d0b432..8ae540163c6c2c08dabf9844eef0db3b
  
      if target.endswith('-softmmu') and 'CONFIG_TCG' in config_target
 diff --git a/util/module.c b/util/module.c
-index 8f8e6994f11256124c9a03a2214b6821e921f1b5..66b8575f6043f3d635cb014c0317e0d9ab056e79 100644
+index 8f8e6994f11256124c9a03a2214b6821e921f1b5..01eac66203dd0995614d877ad9c4795bf13ecdf5 100644
 --- a/util/module.c
 +++ b/util/module.c
 @@ -14,18 +14,23 @@
@@ -129,7 +129,7 @@ index 8f8e6994f11256124c9a03a2214b6821e921f1b5..66b8575f6043f3d635cb014c0317e0d9
  
  typedef struct ModuleEntry
  {
-@@ -112,6 +117,117 @@ void module_call_init(module_init_type type)
+@@ -112,6 +117,119 @@ void module_call_init(module_init_type type)
      modules_init_done[type] = true;
  }
  
@@ -156,6 +156,7 @@ index 8f8e6994f11256124c9a03a2214b6821e921f1b5..66b8575f6043f3d635cb014c0317e0d9
 +static void module_explain_failure(const char *path, const char *why,
 +                                   Error **errp)
 +{
++    ERRP_GUARD();
 +    void *h = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
 +    const char *abi = h ? dlsym(h, "panda_module_abi") : NULL;
 +
@@ -190,6 +191,7 @@ index 8f8e6994f11256124c9a03a2214b6821e921f1b5..66b8575f6043f3d635cb014c0317e0d9
 +               "host", path);
 +    return false;
 +#else
++    ERRP_GUARD();
 +    ModuleEntry *e;
 +    const char *abi;
 +    void *handle;
