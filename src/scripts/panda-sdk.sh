@@ -2,7 +2,8 @@
 # Make the panda board SDK from a finished engine build: what an external board or device
 # (a "panda module") compiles against, without the engine's source and build trees.
 #
-#   ./scripts/panda-sdk.sh BUILD_DIR OUT [SRC_DIR]
+#   scripts/panda-sdk.sh BUILD_DIR OUT [SRC_DIR]     (in the engine source tree; the nix engine
+#                                                    runs it into its "sdk" output)
 #
 # OUT/src mirrors the source tree's headers (include/, target/, hw/, host/, tcg/,
 # linux-headers/) and OUT/src/build the build's generated headers (config-*.h, qapi/, trace/,
@@ -32,12 +33,13 @@ arches=$(for f in "$BUILD"/*-config-target.h; do
     sed -n 's/^TARGET_BASE_ARCH=//p; s/^TARGET_ARCH=//p' "$SRC/configs/targets/$t.mak" | tail -1
 done | sort -u)
 (cd "$SRC" && find include $(for a in $arches; do echo target/$a; done) hw host tcg linux-headers subprojects/libvduse \
-     -name '*.h' -o -name '*.h.inc' -o -name '*.c.inc' 2>/dev/null) |
-    (cd "$SRC" && cpio -pdm --quiet "$OUT/src")
+     -name '*.h' -o -name '*.h.inc' -o -name '*.c.inc' 2>/dev/null) > "$OUT/.list"
+tar -C "$SRC" -cf - -T "$OUT/.list" | tar -C "$OUT/src" -xf -
 # Generated headers.
 (cd "$BUILD" && find . -path ./pyvenv -prune -o -path ./meson-private -prune -o \
-     \( -name '*.h' -o -name '*.h.inc' \) -print) |
-    (cd "$BUILD" && cpio -pdm --quiet "$OUT/src/build")
+     \( -name '*.h' -o -name '*.h.inc' \) -print) > "$OUT/.list"
+tar -C "$BUILD" -cf - -T "$OUT/.list" | tar -C "$OUT/src/build" -xf -
+rm "$OUT/.list"
 
 python3 - "$BUILD" "$SRC" "$OUT" <<'PY'
 import glob, json, os, re, shlex, sys
