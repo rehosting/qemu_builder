@@ -62,3 +62,4 @@
 11.1.0/0080-accel-tcg-cpu_exec_step_atomic-runs-in-an-RCU-read-s.patch
 11.1.0/0081-target-arm-a-snapshot-loads-across-icount-on-off-PMC.patch
 11.1.0/0082-target-riscv-log-hardware-A-D-page-table-updates-as-.patch
+11.1.0/0090-plugins-keep-the-access-direction-clear-of-the-MemOp.patch
