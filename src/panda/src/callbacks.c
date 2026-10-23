@@ -470,9 +470,12 @@ void panda_require(const char *plugin_name) {
  * resumed after, without a runstate change. A request from anywhere else (a vCPU, a thread without
  * the BQL) marks the plugins and leaves the unload to a main-loop bottom half.
  */
+/* Depth of main-thread callback walks in progress (cb-support.c): inside one, unloads are deferred. */
+int panda_main_walk_depth;
+
 static bool panda_on_main_thread(void)
 {
-    return bql_locked() && !current_cpu && qemu_in_main_thread();
+    return bql_locked() && !current_cpu && qemu_in_main_thread() && panda_main_walk_depth == 0;
 }
 
 static bool panda_vcpus_pause(void)
@@ -517,6 +520,15 @@ static void panda_unload_marked(void)
         }
     }
     panda_vcpus_resume(paused);
+}
+
+/* Called when the outermost main-thread walk ends (cb-support.c): unloads requested inside it run
+ * now, in the same main-loop iteration (pandare2 queues stop_run right after unload_plugins). */
+void panda_unload_pending(void)
+{
+    if (panda_plugin_to_unload && panda_on_main_thread()) {
+        panda_unload_marked();
+    }
 }
 
 static bool panda_unload_bh_queued;
@@ -701,6 +713,7 @@ static void panda_cb_retired_free(PandaCbRetired *r)
 static void panda_cb_retire(panda_cb_list *node)
 {
     PandaCbRetired *r = g_new(PandaCbRetired, 1);
+    qatomic_set(&node->enabled, false);     /* a walker still on it doesn't call it again */
     r->node = node;
     call_rcu(r, panda_cb_retired_free, rcu);
 }
@@ -719,7 +732,7 @@ static unsigned panda_tb_shape;
 
 static unsigned panda_translation_shape(void)
 {
-    return (panda_bridge_wants() & (PANDA_BRIDGE_INSN | PANDA_BRIDGE_BLOCK))
+    return (panda_bridge_wants() & (PANDA_BRIDGE_INSN | PANDA_BRIDGE_BLOCK | PANDA_BRIDGE_TB_PC))
            | (unsigned) panda_memcb_rw(false) << 8
            | (unsigned) panda_memcb_rw(true) << 16;
 }
