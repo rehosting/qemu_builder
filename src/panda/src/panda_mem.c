@@ -1,7 +1,12 @@
 #include "panda/common.h"
+#include "panda/plugin.h"
+#include "panda/panda_qemu_plugin_helpers.h"
 #include "system/physmem.h"
 #include "system/ramblock.h"
 #include "exec/translation-block.h"
+#include "accel/tcg/cpu-loop.h"
+#include "qemu/plugin.h"
+#include "system/tcg.h"
 
 /* (not kernel-doc)
  * panda_physical_memory_rw() - Copy data between host and guest.
@@ -248,6 +253,199 @@ int panda_virtual_memory_write(CPUState *env, target_ulong addr,
     return panda_virtual_memory_rw(env, addr, buf, len, 1);
 }
 
+
+/*
+ * The opt-in page-in path: panda_virtual_memory_rw_fault() and friends (doc in panda/common.h).
+ *
+ * The standard accessors above never change guest state: they walk the page tables for debug and
+ * fail on a page that is not mapped. This path instead lets the guest fault the page in, as the
+ * program itself would by touching it. It rides on the engine's faulting plugin accesses (patches
+ * 0013-0017, 0032, and 0061's probe), which raise the guest fault by unwinding to the instrumented
+ * instruction through the host return address a trampoline records (RW_REGS_PC callbacks only).
+ *
+ * The fault is never raised from inside the PANDA callback that asked for it: that callback may be
+ * Python (cffi), whose interpreter frames a longjmp would skip, or C++ with destructors. The
+ * request is kept here and raised by the bridge's own callback once every PANDA callback for the
+ * event has returned (panda_vmem_fault_close). The guest takes the fault, resolves it, and runs the
+ * instruction (or block) again, so the callbacks run again and the access then succeeds.
+ *
+ * Nothing here runs unless panda_enable_vmem_fault() was called: until then the bridge registers
+ * exactly the callbacks it always did (RW_REGS, no trampoline, no window).
+ */
+static bool vmem_fault_on;
+
+/* The callback window on this vCPU thread: open while PANDA callbacks for an event that may fault
+ * run (bridge's insn_exec, a block's start). @ra pins it to the trampoline's return address, which
+ * a longjmp out of the block clears (0031), so a window left open by a longjmp authorizes nothing. */
+typedef struct {
+    CPUState *cpu;
+    bool open;
+    uintptr_t ra;
+    uint64_t pc;
+    bool pending;           /* a guest fault to raise at close */
+    bool write;
+    uint64_t addr;
+} VmemFaultWindow;
+static __thread VmemFaultWindow vmf;
+
+/* The last fault raised on this thread: if the callbacks at the same pc ask for the same page again
+ * and it is still not accessible, the guest did not resolve it (it refused it, or delivered a
+ * signal whose handler returned): fail instead of faulting forever. */
+static __thread struct {
+    CPUState *cpu;
+    bool valid;
+    bool write;
+    uint64_t pc;
+    uint64_t page;
+} vmf_last;
+
+void panda_enable_vmem_fault(void)
+{
+    if (!vmem_fault_on) {
+        vmem_fault_on = true;
+        panda_do_flush_tb();    /* code translated before it has no trampolined callbacks */
+    }
+}
+
+void panda_disable_vmem_fault(void)
+{
+    if (vmem_fault_on) {
+        vmem_fault_on = false;
+        panda_do_flush_tb();
+    }
+}
+
+bool panda_vmem_fault_enabled(void)
+{
+    return vmem_fault_on;
+}
+
+bool panda_bridge_vmem_fault(void)
+{
+    return vmem_fault_on;
+}
+
+void panda_vmem_fault_open(CPUState *cpu, uint64_t pc)
+{
+    vmf = (VmemFaultWindow) {
+        .cpu = cpu, .open = true, .ra = cpu->neg.plugin_cb_ra, .pc = pc,
+    };
+}
+
+static bool vmem_fault_window_ok(CPUState *cpu)
+{
+    return vmem_fault_on && tcg_enabled() && cpu && cpu == current_cpu &&
+           vmf.open && vmf.cpu == cpu && vmf.ra && vmf.ra == cpu->neg.plugin_cb_ra &&
+           qemu_plugin_get_cb_flags() == QEMU_PLUGIN_CB_RW_REGS_PC;
+}
+
+void panda_vmem_fault_close(CPUState *cpu)
+{
+    VmemFaultWindow w = vmf;
+
+    vmf.open = false;
+    vmf.pending = false;
+    if (!w.pending || !w.open || w.cpu != cpu || !w.ra || w.ra != cpu->neg.plugin_cb_ra) {
+        return;
+    }
+    vmf_last.cpu = cpu;
+    vmf_last.valid = true;
+    vmf_last.write = w.write;
+    vmf_last.pc = w.pc;
+    vmf_last.page = w.addr & TARGET_PAGE_MASK;
+    /* Raises the guest's own fault for the access and does not return... */
+    qemu_plugin_probe_memory_vaddr_fault(w.addr, 1, w.write, QEMU_PLUGIN_VADDR_USER, true);
+    /* ...unless the page became accessible without one (or only the fault index could reach it).
+     * The callbacks were promised a re-run: restart the instruction without an exception. */
+    cpu_loop_exit_restore(cpu, w.ra);
+}
+
+/* One page of the access: accessible as the program would access it? */
+static bool vmem_user_ok(uint64_t addr, bool is_write)
+{
+    return qemu_plugin_probe_memory_vaddr_fault(addr, 1, is_write, QEMU_PLUGIN_VADDR_USER, false)
+           == QEMU_PLUGIN_VADDR_OK;
+}
+
+int panda_virtual_memory_rw_fault(CPUState *cpu, target_ulong addr, uint8_t *buf, int len,
+                                  bool is_write)
+{
+    GByteArray *data;
+    int r;
+
+    if (len <= 0 || !buf) {
+        return PANDA_VMEM_EINVAL;
+    }
+    if (!vmem_fault_window_ok(cpu)) {
+        return PANDA_VMEM_ECONTEXT;
+    }
+
+    data = g_byte_array_sized_new(len);
+    if (is_write) {
+        g_byte_array_append(data, buf, len);
+        r = qemu_plugin_write_memory_vaddr_fault(addr, data, QEMU_PLUGIN_VADDR_USER, false);
+    } else {
+        r = qemu_plugin_read_memory_vaddr_fault(addr, data, len, QEMU_PLUGIN_VADDR_USER, false);
+        if (r == QEMU_PLUGIN_VADDR_OK) {
+            memcpy(buf, data->data, len);
+        }
+    }
+    g_byte_array_free(data, true);
+
+    switch (r) {
+    case QEMU_PLUGIN_VADDR_OK:
+        if (vmf_last.valid && vmf_last.cpu == cpu &&
+            vmf_last.page + TARGET_PAGE_SIZE > (uint64_t) addr &&
+            vmf_last.page < (uint64_t) addr + len) {
+            vmf_last.valid = false;     /* the page it faulted in: resolved */
+        }
+        return PANDA_VMEM_OK;
+    case QEMU_PLUGIN_VADDR_IO:
+        return PANDA_VMEM_EIO;
+    case QEMU_PLUGIN_VADDR_UNMAPPED:
+        break;
+    default:
+        return PANDA_VMEM_ECONTEXT;     /* no user-mode translation on this target */
+    }
+
+    /* The first page the program could not access this way. */
+    for (uint64_t page = addr & TARGET_PAGE_MASK; page < (uint64_t) addr + len;
+         page += TARGET_PAGE_SIZE) {
+        uint64_t a = page < addr ? addr : page;
+
+        if (vmem_user_ok(a, is_write)) {
+            continue;
+        }
+        if (panda_virt_to_phys(cpu, a) != (hwaddr) -1 &&
+            (!is_write || !vmem_user_ok(a, false))) {
+            /* Mapped, but not for user mode (kernel memory): a fault would be the program's
+             * SIGSEGV, not a page-in. */
+            return PANDA_VMEM_ERROR;
+        }
+        if (vmf_last.valid && vmf_last.cpu == cpu && vmf_last.pc == vmf.pc &&
+            vmf_last.page == page && vmf_last.write == is_write) {
+            vmf_last.valid = false;     /* raised here before and the guest didn't map it */
+            return PANDA_VMEM_ERROR;
+        }
+        if (!vmf.pending) {
+            vmf.pending = true;
+            vmf.write = is_write;
+            vmf.addr = a;
+        }
+        return PANDA_VMEM_FAULT_PENDING;
+    }
+    return PANDA_VMEM_ERROR;    /* not reached: some page failed */
+}
+
+int panda_virtual_memory_read_fault(CPUState *cpu, target_ulong addr, uint8_t *buf, int len)
+{
+    return panda_virtual_memory_rw_fault(cpu, addr, buf, len, false);
+}
+
+int panda_virtual_memory_write_fault(CPUState *cpu, target_ulong addr, uint8_t *buf, int len)
+{
+    return panda_virtual_memory_rw_fault(cpu, addr, buf, len, true);
+}
 
 /**
  * panda_map_virt_to_host() - Map guest virtual addresses into host.

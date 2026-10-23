@@ -161,6 +161,14 @@ typedef union panda_cb {
 
        Return value:
         none
+
+       Notes:
+        After panda_enable_vmem_fault() it may call the opt-in page-in
+        accessors (panda_virtual_memory_read_fault() and friends, see
+        panda/common.h). When one returns PANDA_VMEM_FAULT_PENDING, the
+        guest takes a page fault at the block's first instruction once the
+        block-start callbacks return, the block ends with TB_EXIT_REQUESTED,
+        and the block starts again: before_block_exec runs again for it.
     */
     void (*before_block_exec)(CPUState *env, TranslationBlock *tb);
 
@@ -321,6 +329,13 @@ typedef union panda_cb {
         helper function just before the instruction itself is generated.
         This is fairly expensive, which is why it's only enabled via
         the PANDA_CB_INSN_TRANSLATE callback.
+
+        After panda_enable_vmem_fault() it (and everything it dispatches,
+        e.g. syscalls2's on_*_enter callbacks) may call the opt-in page-in
+        accessors (panda_virtual_memory_read_fault() and friends, see
+        panda/common.h). When one returns PANDA_VMEM_FAULT_PENDING, the
+        guest takes the page fault at this instruction once every insn_exec
+        callback has returned, and runs it again: insn_exec runs again.
     */
     int (*insn_exec)(CPUState *env, uint64_t pc);
 
@@ -1065,6 +1080,7 @@ typedef union panda_cb {
 
        start_block_exec:
         This is like before_block_exec except its part of the TCG stream.
+        It may call the page-in accessors as before_block_exec may.
 
        Arguments:
         CPUState *env:        the current CPU state
@@ -2053,6 +2069,7 @@ typedef union panda_cb_with_context {
 
        start_block_exec:
         This is like before_block_exec except its part of the TCG stream.
+        It may call the page-in accessors as before_block_exec may.
 
        Arguments:
         CPUState *env:        the current CPU state

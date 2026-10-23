@@ -37,3 +37,15 @@ void panda_end_block_drop_all(void);
  * callback is conditional on it, so registered-but-disabled callbacks cost a compare per block. */
 void panda_bridge_set_block_gate(void (*set)(uint64_t on));
 uint64_t panda_block_gate(void);
+
+/* The opt-in page-in path (panda_enable_vmem_fault, panda/common.h). While it is on, the bridge
+ * registers its insn_exec and block-start callbacks with QEMU_PLUGIN_CB_RW_REGS_PC (entered through
+ * the engine's return-address trampoline) and brackets the PANDA callbacks they run with
+ * panda_vmem_fault_open/close; close raises the guest fault a callback asked for, and does not
+ * return then. panda_block_start_fault is panda_block_start with the window around the new block's
+ * own callbacks only (the block before it ends first, outside it: its after_block_exec would not
+ * run again). */
+bool panda_bridge_vmem_fault(void);   /* panda_vmem_fault_enabled(), for the bridge */
+void panda_vmem_fault_open(CPUState *cpu, uint64_t pc);
+void panda_vmem_fault_close(CPUState *cpu);
+void panda_block_start_fault(CPUState *cpu, TranslationBlock *tb);

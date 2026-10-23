@@ -78,6 +78,66 @@ int panda_virtual_memory_read(CPUState * env, target_ulong addr,
 int panda_virtual_memory_write(CPUState * env, target_ulong addr,
                                uint8_t * buf, int len);
 void *panda_map_virt_to_host(CPUState * env, target_ulong addr, int len);
+
+/*
+ * Opt-in, non-standard: guest virtual memory that is not paged in.
+ *
+ * panda_virtual_memory_rw() and friends never change the guest: they translate with a debug page
+ * walk and fail (-1) on a page that is not mapped (never touched, swapped out, evicted). The
+ * functions below are a separate, explicitly selected path that lets the guest fault such a page
+ * in, as the program would by touching it itself. That changes guest state: the guest takes a page
+ * fault (and its kernel runs: page cache, swap-in, copy-on-write, a new anonymous page), and the
+ * instruction it was about to run, with every PANDA callback for it, runs again.
+ *
+ * How to use it:
+ * 1. panda_enable_vmem_fault() once, before the code you want to access memory from is translated
+ *    (it flushes the translation cache). Until it is called nothing changes for anyone; after it,
+ *    insn_exec and block-start callbacks are entered through a trampoline (a few instructions each).
+ * 2. From an insn_exec callback (and everything dispatched from one, e.g. syscalls2's on_*_enter
+ *    callbacks), or from before_block_exec or start_block_exec, call
+ *    panda_virtual_memory_read_fault() / _write_fault() / _rw_fault().
+ * 3. PANDA_VMEM_OK: done. PANDA_VMEM_FAULT_PENDING: a page needs the guest; nothing was read or
+ *    written. Return from your callback without acting on the access. Once every callback for
+ *    this event has returned, the guest takes the fault the program's own access would take
+ *    (#PF, data abort, load/store page fault), resolves it, and resumes at the same instruction,
+ *    so your callback (and every other one for the event) runs again; call it again then.
+ *    A range over several pages may need several rounds. Callbacks must therefore tolerate
+ *    running more than once for one guest instruction.
+ *
+ * The access is made as the guest program would make it: user-mode permissions, in the current
+ * address space. A write to a copy-on-write or clean page is a store fault the kernel resolves (the
+ * write lands in the process's private copy); a read never writes. Kernel memory (mapped, but not
+ * for user mode) is never faulted: PANDA_VMEM_ERROR, use panda_virtual_memory_rw() for it. An
+ * address that the program itself could not access (no mapping, a write to a read-only mapping)
+ * gets what the program would get: SIGSEGV (or, from kernel code, whatever the kernel does with a
+ * user fault there; that is the caller's responsibility). If the same page faults again at the same
+ * instruction without being mapped, the call returns PANDA_VMEM_ERROR instead of faulting again.
+ *
+ * Called from anywhere else (another callback type, the main loop, another thread, another vCPU,
+ * before panda_enable_vmem_fault(), under KVM) it returns PANDA_VMEM_ECONTEXT and touches nothing:
+ * there is no instruction there to re-run. Memory callbacks (virt/phys_mem_*) are not supported.
+ * It does not drop the BQL and is independent of patch 0028.
+ */
+typedef enum panda_vmem_fault_result {
+    PANDA_VMEM_OK = 0,
+    PANDA_VMEM_FAULT_PENDING = 1,   /* return from the callback; it runs again after the fault */
+    PANDA_VMEM_ERROR = -1,          /* not accessible to the program, and not faulted */
+    PANDA_VMEM_EIO = -2,            /* not RAM (MMIO, ROM store): never accessed */
+    PANDA_VMEM_ECONTEXT = -3,       /* not from a callback that may fault (see above) */
+    PANDA_VMEM_EINVAL = -4,         /* len <= 0 or buf NULL */
+} panda_vmem_fault_result;
+
+/* Make insn_exec and block-start callbacks able to fault pages in (flushes translated code). */
+void panda_enable_vmem_fault(void);
+/* Back to the standard callbacks (flushes translated code). */
+void panda_disable_vmem_fault(void);
+bool panda_vmem_fault_enabled(void);
+/* Read or write @len bytes at guest virtual @addr, faulting pages in: returns a
+ * panda_vmem_fault_result (see above). */
+int panda_virtual_memory_rw_fault(CPUState * cpu, target_ulong addr, uint8_t * buf, int len,
+                                  bool is_write);
+int panda_virtual_memory_read_fault(CPUState * cpu, target_ulong addr, uint8_t * buf, int len);
+int panda_virtual_memory_write_fault(CPUState * cpu, target_ulong addr, uint8_t * buf, int len);
 // MemTxResult PandaPhysicalAddressToRamOffset(ram_addr_t* out, hwaddr addr, bool is_write);
 // MemTxResult PandaVirtualAddressToRamOffset(ram_addr_t* out, CPUState* cpu, target_ulong addr, bool is_write);
 

@@ -30,6 +30,13 @@ static void block_start_cb(unsigned int cpu_index, void *udata)
     panda_block_start(panda_cpu_by_index(cpu_index), (TranslationBlock *) udata);
 }
 
+// With panda_enable_vmem_fault() on: the same, registered RW_REGS_PC (so the engine's trampoline
+// records the return address into the block) and with the page-in window around the callbacks.
+static void block_start_fault_cb(unsigned int cpu_index, void *udata)
+{
+    panda_block_start_fault(panda_cpu_by_index(cpu_index), (TranslationBlock *) udata);
+}
+
 static void set_gate(uint64_t on)
 {
     gate_on = on;
@@ -57,6 +64,14 @@ static void insn_exec(unsigned int cpu_index, void *udata)
 {
     CPUState *cpu = panda_cpu_by_index(cpu_index);
     panda_callbacks_insn_exec(cpu, (uint64_t) udata);
+}
+
+static void insn_exec_fault(unsigned int cpu_index, void *udata)
+{
+    CPUState *cpu = panda_cpu_by_index(cpu_index);
+    panda_vmem_fault_open(cpu, (uint64_t) udata);
+    panda_callbacks_insn_exec(cpu, (uint64_t) udata);
+    panda_vmem_fault_close(cpu);    // may raise the guest fault a callback asked for
 }
 
 // udata is the accessing instruction's pc.
@@ -123,6 +138,9 @@ static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
     unsigned wants = panda_bridge_wants();
     int mem_rw[2] = { panda_memcb_rw(false), panda_memcb_rw(true) };
     size_t n_insns = qemu_plugin_tb_n_insns(tb);
+    // The opt-in page-in path: decided here, at translation, so code translated without it is
+    // exactly what it always was.
+    bool fault = panda_bridge_vmem_fault();
 
     if (wants & PANDA_BRIDGE_TB_PC) {
         qemu_plugin_tb_vaddr(tb);   // binds the TB to its address (patch 0035): tb->pc is right
@@ -132,8 +150,14 @@ static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
             struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
             uint64_t insn_pc = qemu_plugin_insn_vaddr(insn);
             if ((wants & PANDA_BRIDGE_INSN) && panda_callbacks_insn_translate(cpu, insn_pc)) {
-                qemu_plugin_register_vcpu_insn_exec_cb(insn, insn_exec, QEMU_PLUGIN_CB_RW_REGS,
-                                                       (void *) insn_pc);
+                if (fault) {
+                    qemu_plugin_register_vcpu_insn_exec_cb(insn, insn_exec_fault,
+                                                           QEMU_PLUGIN_CB_RW_REGS_PC,
+                                                           (void *) insn_pc);
+                } else {
+                    qemu_plugin_register_vcpu_insn_exec_cb(insn, insn_exec, QEMU_PLUGIN_CB_RW_REGS,
+                                                           (void *) insn_pc);
+                }
             }
             for (int s = 0; s < 2; s++) {
                 if (mem_rw[s]) {
@@ -146,8 +170,14 @@ static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
 
     TranslationBlock *real_tb = panda_get_tb(tb);
     if (wants & PANDA_BRIDGE_BLOCK) {
-        qemu_plugin_register_vcpu_tb_exec_cond_cb(tb, block_start_cb, QEMU_PLUGIN_CB_RW_REGS,
-                                                  QEMU_PLUGIN_COND_NE, gate, 0, real_tb);
+        if (fault) {
+            qemu_plugin_register_vcpu_tb_exec_cond_cb(tb, block_start_fault_cb,
+                                                      QEMU_PLUGIN_CB_RW_REGS_PC,
+                                                      QEMU_PLUGIN_COND_NE, gate, 0, real_tb);
+        } else {
+            qemu_plugin_register_vcpu_tb_exec_cond_cb(tb, block_start_cb, QEMU_PLUGIN_CB_RW_REGS,
+                                                      QEMU_PLUGIN_COND_NE, gate, 0, real_tb);
+        }
     }
 
     panda_callbacks_block_translate(cpu, tb);

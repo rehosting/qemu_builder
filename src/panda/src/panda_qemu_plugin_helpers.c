@@ -180,6 +180,13 @@ void panda_block_start(CPUState *cpu, TranslationBlock *tb){
     p->end = true;
 }
 
+void panda_block_start_fault(CPUState *cpu, TranslationBlock *tb){
+    panda_end_block_flush(cpu);     /* panda_block_start's own flush is then a no-op */
+    panda_vmem_fault_open(cpu, tb->pc);
+    panda_block_start(cpu, tb);
+    panda_vmem_fault_close(cpu);    /* may raise the guest fault a callback asked for */
+}
+
 /* The bridge's gate: its block-start callback is conditional on a per-vCPU word it owns, which
  * PANDA sets to 1 while any block-exec callback is enabled. */
 static void (*block_gate_set)(uint64_t on);
