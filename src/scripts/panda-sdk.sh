@@ -36,7 +36,7 @@ done | sort -u)
      -name '*.h' -o -name '*.h.inc' -o -name '*.c.inc' 2>/dev/null) > "$OUT/.list"
 tar -C "$SRC" -cf - -T "$OUT/.list" | tar -C "$OUT/src" -xf -
 # Generated headers.
-(cd "$BUILD" && find . -path ./pyvenv -prune -o -path ./meson-private -prune -o \
+(cd "$BUILD" && find . -path ./pyvenv -prune -o -path ./meson-private -prune -o -path ./qemu-bundle -prune -o \
      \( -name '*.h' -o -name '*.h.inc' \) -print) > "$OUT/.list"
 tar -C "$BUILD" -cf - -T "$OUT/.list" | tar -C "$OUT/src/build" -xf -
 rm "$OUT/.list"
