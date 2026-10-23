@@ -80,10 +80,9 @@ MAKE_CALLBACK(void, AFTER_CPU_EXEC_ENTER, after_cpu_exec_enter,
 MAKE_CALLBACK(void, BEFORE_CPU_EXEC_EXIT, before_cpu_exec_exit,
                     CPUState*, cpu, bool, ranBlock);
 
-// Not macroized: a loadvm rewrote RAM without dirty bits, so a fast restore can't trust them.
+// Not macroized. (A fast restore learns that loadvm rewrote RAM from panda_before_loadvm.)
 void PCB(after_loadvm)(CPUState *env) {
     panda_cb_list *plist;
-    panda_fast_ram_untracked();
     for (plist = panda_cbs[PANDA_CB_AFTER_LOADVM]; plist != NULL; plist = panda_cb_list_next(plist)) {
         if (plist->enabled)
             plist->entry.after_loadvm(plist->context, env);
