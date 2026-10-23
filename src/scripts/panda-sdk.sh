@@ -8,8 +8,11 @@
 # OUT/src mirrors the source tree's headers (include/, target/, hw/, host/, tcg/,
 # linux-headers/) and OUT/src/build the build's generated headers (config-*.h, qapi/, trace/,
 # panda-abi.h ...), so the compile lines QEMU used (compile_commands.json) work unchanged when
-# run in OUT/src/build. OUT/cflags.<target> is one such line per target, plus -DBUILD_DSO and
-# -include qemu/panda-module.h (which stamps the module with the panda ABI hash).
+# run in OUT/src/build. OUT/cflags.<target> is one such line per target, plus -DBUILD_DSO,
+# -include qemu/panda-module.h (which stamps the module with a PandaModuleInfo: the panda ABI
+# hash and the target), -fPIC, and -fvisibility=hidden (with -Wl,-Bsymbolic at link time, so the
+# engine's symbols, or an earlier module's, can't replace the module's own functions: modules
+# are dlopen()ed RTLD_GLOBAL into an executable that exports ~32k symbols).
 # OUT/bin/panda-board-cc compiles and links a module:
 #
 #   panda-board-cc arm-softmmu -o board.so a.c b.c [-Iinclude ...]
@@ -61,7 +64,8 @@ for t in targets:
     cmd = cmd.replace(src + "/", "../").replace(src, "..")
     argv = shlex.split(cmd)
     cc, flags = argv[0], argv[1:]
-    flags += ["-DBUILD_DSO", "-include", "qemu/panda-module.h"]
+    flags = [a for a in flags if a not in ("-fPIE", "-fpie", "-fno-pic", "-fno-PIC")]
+    flags += ["-DBUILD_DSO", "-include", "qemu/panda-module.h", "-fPIC", "-fvisibility=hidden"]
     cflags[t] = {"cc": cc, "flags": flags}
     with open(os.path.join(out, f"cflags.{t}"), "w") as f:
         f.write(" ".join(shlex.quote(a) for a in flags) + "\n")
@@ -104,7 +108,7 @@ for p in "${pids[@]}"; do wait "$p" || fail=1; done
 [ $fail = 0 ] || { echo "panda-board-cc: compile failed" >&2; exit 1; }
 case "$(uname)" in
     Darwin) $CC -bundle -undefined dynamic_lookup -o "$out" "${objs[@]}" ;;
-    *) $CC -shared -o "$out" "${objs[@]}" ;;
+    *) $CC -shared -Wl,-Bsymbolic -o "$out" "${objs[@]}" ;;
 esac
 SH
 chmod +x "$OUT/bin/panda-board-cc"
