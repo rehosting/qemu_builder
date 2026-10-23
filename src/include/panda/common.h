@@ -59,8 +59,17 @@ extern bool panda_exit_loop;
 extern bool panda_break_vl_loop_req;
 
 
+/* The current process's identifier: the physical address of its top-level page table where the
+ * architecture has one (x86 CR3 base, arm TTBR0 base, riscv satp PPN), else the hardware ASID.
+ * asid_changed passes the old and new value of this, and fires only when it changes. Per-arch
+ * choices and where they fall short: panda_current_asid() in panda/src/common.c. */
 target_ulong panda_current_asid(CPUState *env);
-    
+/* The hardware address-space id field (x86 PCID, arm TTBR/CONTEXTIDR ASID, riscv satp.ASID, mips
+ * EntryHi.ASID, ppc PID): recycled by the guest, so not a process identifier. */
+target_ulong panda_current_asid_field(CPUState *env);
+/* Called by panda_asid_reg_write (hooks.h) for each write to a register panda_current_asid reads */
+void panda_asid_note_write(CPUState *cpu, uint64_t old_val, uint64_t new_val);
+
 target_ulong panda_current_pc(CPUState *cpu);
 
 Int128 panda_find_max_ram_address(void);
