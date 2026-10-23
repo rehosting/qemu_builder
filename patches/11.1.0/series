@@ -52,6 +52,6 @@
 11.1.0/0052-replay-x-rr-begin-record-rewinds-the-log-to-the-star.patch
 11.1.0/0053-panda-main_loop_wait-callback-at-each-main-loop-iter.patch
 11.1.0/0054-panda-after_loadvm-callback-when-load_snapshot-succe.patch
-11.1.0/0055-module-load-panda-modules-by-path-checked-against-a-.patch
+11.1.0/0055-module-load-panda-modules-by-path-checked-against-th.patch
 11.1.0/0056-vl-M-PATH-NAME-and-module-PATH-load-panda-modules.patch
 11.1.0/0057-hw-core-build-the-configurable-machine-and-its-QAPI-.patch
