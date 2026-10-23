@@ -130,7 +130,7 @@ void PCB(start_block_exec)(CPUState *cpu, TranslationBlock *tb) {
     }
 
     if (panda_break_exec()) {
-        cpu_loop_exit_noexc(cpu); // noreturn - lonjmps back to translation logic. Allows you to change pc in an SBE and go
+        panda_block_leave_at_start(cpu, tb); // noreturn (cpu_loop_exit_noexc, the icount budget given back) - lonjmps back to translation logic. Allows you to change pc in an SBE and go
                                   // there immediately. It's like before_block_exec_invalidate_opt, but fast
     }
 }

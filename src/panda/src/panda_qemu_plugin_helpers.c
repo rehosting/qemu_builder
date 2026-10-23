@@ -137,6 +137,8 @@ void panda_end_block_drop_all(void){
     }
 }
 
+G_NORETURN void panda_block_leave_at_start(CPUState *cpu, TranslationBlock *tb);
+
 /* before_block_exec_invalidate_opt: a callback asked for this block to be translated again before
  * it runs. Drop its TB (the part on its first page is enough to make the lookup miss) and leave
  * it; the next start at this pc is the new TB's and isn't asked again, as in PANDA's
@@ -150,6 +152,19 @@ static void panda_block_invalidate(CPUState *cpu, TranslationBlock *tb, PandaPen
     p->skip_pc = panda_current_pc(cpu);
     if (start != (tb_page_addr_t) -1) {
         tb_invalidate_phys_range(cpu, start, MIN(last, page_last));
+    }
+    panda_block_leave_at_start(cpu, tb);
+}
+
+/* Leave a block from its start callback, before its first instruction. Under icount, the TB's
+ * prologue (gen_tb_start, before the plugin's TB-start callback) has already taken its whole
+ * instruction count from the budget, and cpu_loop_exit_noexc doesn't give it back
+ * (cpu_restore_state would): give it back here, or each such exit counts tb->icount instructions
+ * that never ran, and a replay drifts from its recording. The PC is the block's (CF_PCREL, or
+ * panda_block_sync_pc), unless a callback set another one to go there. */
+void panda_block_leave_at_start(CPUState *cpu, TranslationBlock *tb){
+    if (tb_cflags(tb) & CF_USE_ICOUNT) {
+        cpu->neg.icount_decr.u16.low += tb->icount;
     }
     cpu_loop_exit_noexc(cpu);
 }
