@@ -31,6 +31,7 @@
 #include "system/cpus.h"
 #include "panda/callbacks/cb-support.h"
 #include "panda/wrap_ops.h"
+#include "hw/core/panda-modules.h"
 
 // call main_aux and run everything up to and including panda_callbacks_after_machine_init
 int panda_init(int argc, char **argv, char **envp) {
@@ -93,6 +94,8 @@ int panda_fast_snap(void) {
     Error *err = NULL;
     QIOChannelBuffer *bioc;
     QEMUFile *f;
+
+    panda_modules_check_vmstate("fast restore");
 
     if (runstate_is_running()) {
         vm_stop(RUN_STATE_SAVE_VM);
@@ -176,6 +179,8 @@ void panda_main_loop_kick(void) {
  */
 int panda_snap(char *snapshot_name) {
     Error *err = NULL;
+
+    panda_modules_check_vmstate("savevm");
     if (!save_snapshot(snapshot_name, true, NULL, false, NULL, &err)) {
         error_report_err(err);
         return -1;
