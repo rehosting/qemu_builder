@@ -31,6 +31,7 @@ PANDAENDCOMMENT */
 #include "panda/common.h"
 #include "panda/callbacks/cb-trampolines.h"
 #include "panda/callbacks/cb-support.h"
+#include "panda/panda_qemu_plugin_helpers.h"
 
 #include "qemu/rcu.h"
 #include "qemu/thread.h"
@@ -704,16 +705,33 @@ static void panda_cb_retire(panda_cb_list *node)
     call_rcu(r, panda_cb_retired_free, rcu);
 }
 
-/* A callback list changed. Block-exec callbacks run from instrumentation the bridge adds at
- * translation, only while one is registered: the first one registered (and the last one gone)
- * flushes the TBs so code translated before it gets (or loses) the block start; enabling and
- * disabling only opens and closes the bridge's gate (no retranslation). */
+/*
+ * A callback list changed. Code the TCG bridge instruments is decided at translation, by what is
+ * registered then (panda_bridge_wants, panda_memcb_rw): block-exec callbacks get a block-start
+ * call, insn_translate asks per instruction for insn_exec, memory callbacks get before/after access
+ * calls. So when that shape changes (the first such callback registered, the last one gone, a
+ * memory callback's before/after side added), every TB translated before is flushed: it would
+ * otherwise go on running without the instrumentation (callbacks registered late missed code
+ * already translated) or with instrumentation nobody wants. Enabling and disabling don't change
+ * the shape (the bridge's gate and the lists' enabled flags handle them). Only list changes pay.
+ */
+static unsigned panda_tb_shape;
+
+static unsigned panda_translation_shape(void)
+{
+    return (panda_bridge_wants() & (PANDA_BRIDGE_INSN | PANDA_BRIDGE_BLOCK))
+           | (unsigned) panda_memcb_rw(false) << 8
+           | (unsigned) panda_memcb_rw(true) << 16;
+}
+
 static void panda_cb_list_changed(panda_cb_type type, bool was_registered)
 {
+    unsigned shape = panda_translation_shape();
+    if (shape != panda_tb_shape) {
+        panda_tb_shape = shape;
+        panda_do_flush_tb();
+    }
     if (panda_is_block_cb_type(type)) {
-        if (was_registered != (panda_cbs[type] != NULL)) {
-            panda_do_flush_tb();
-        }
         panda_block_cbs_changed();
     }
 }
@@ -1013,9 +1031,18 @@ bool panda_flush_tb(void)
         return false;
 }
 
+/* Acted on at a vCPU's next TB lookup (before_find_fast). Chained TBs make no lookup, so the
+ * vCPUs are also asked to leave their TBs: the flush then comes before any more guest code runs
+ * (a callback registered from a hypercall sees the very next block instrumented). */
 void panda_do_flush_tb(void)
 {
+    CPUState *cpu;
+
     panda_please_flush_tb = true;
+    RCU_READ_LOCK_GUARD();
+    CPU_FOREACH(cpu) {
+        cpu_exit(cpu);
+    }
 }
 
 void panda_enable_precise_pc(void)
