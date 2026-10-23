@@ -56,6 +56,10 @@ void panda_cont(void) {
     vm_start();
 }
 
+void panda_main_loop_kick(void) {
+    qemu_notify_event();
+}
+
 /*
  * Snapshots of the running VM, from the main loop (pandare2 queues these on main_loop_wait).
  * savevm/loadvm stop the VM themselves and leave it stopped; panda_cont() resumes.

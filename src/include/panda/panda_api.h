@@ -57,6 +57,15 @@ void panda_stop(int code);
 void panda_cont(void);
 
 
+/**
+ * panda_main_loop_kick() - Wake the main loop.
+ *
+ * So it runs the main_loop_wait callbacks soon (pandare2 queues its main-loop work there),
+ * even with the VM stopped.
+ */
+void panda_main_loop_kick(void);
+
+
 // Not an API function.
 void _panda_set_library_mode(const bool);
 
