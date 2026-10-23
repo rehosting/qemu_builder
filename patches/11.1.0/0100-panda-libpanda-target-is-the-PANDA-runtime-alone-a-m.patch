@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Fri, 23 Oct 2026 14:37:18 -0400
+Subject: [PATCH] panda: libpanda-<target> is the PANDA runtime alone, a module
+ over the engine
+
+The PANDA runtime (panda/, the callback API, plugin loading, the TCG plugin bridge's
+counterpart) was linked into every softmmu target and libpanda-<target>.so was a third full
+link of the engine. Now libpanda-<target>.so is built from panda_runtime_ss as a shared
+module that does not link the engine: it is loaded into one (libqemu-system-<name>.so, or an
+executable that exports QEMU's symbols) and installs its hook table there (panda/hooks.c).
+The engine keeps only the hook sites, which test one pointer when no runtime is loaded.
+---
+ meson.build | 20 +++++++++++++-------
+ 1 file changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index 1578cee627b4ebd95c24b3ae1a06f96877d0b432..0dd97e63eecb39b8ca97d3677d973f25b034c83c 100644
+--- a/meson.build
++++ b/meson.build
+@@ -4481,14 +4481,20 @@ foreach target : target_dirs
+     endif
+ 
+     if get_option('panda') and target.endswith('-softmmu') and 'CONFIG_TCG' in config_target
+-      # libpanda-<target>.so, e.g. libpanda-x86_64-softmmu.so: the name libpanda-ng and pandare look for
+-      shared_library('panda-' + target, exe['sources'],
++      # libpanda-<target>.so, e.g. libpanda-x86_64-softmmu.so (the name libpanda-ng and pandare
++      # look for): the PANDA runtime alone, a module loaded into an engine that exports QEMU's
++      # symbols (libqemu-system-<name>.so, or this executable). It does not link the engine;
++      # loading it installs its hook table (panda/hooks.c).
++      panda_rt = panda_runtime_ss.apply(config_target, strict: false)
++      shared_module('panda-' + target,
++                 panda_rt.sources() + genh + [config_target_h[target], config_devices_h[target]],
++                 name_prefix: 'lib',
++                 name_suffix: 'so',
+                  install: true,
+-                 c_args: c_args,
+-                 dependencies: arch_deps + exe['dependencies'],
+-                 objects: lib.extract_all_objects(recursive: true),
+-                 link_depends: [block_syms, qemu_syms],
+-                 link_args: link_args)
++                 install_dir: get_option('libdir'),
++                 c_args: c_args + ['-DPANDA_RUNTIME'],
++                 dependencies: lib_deps + panda_rt.dependencies(),
++                 include_directories: target_inc)
+     endif
+ 
+     if target.endswith('-softmmu') and 'CONFIG_KVM' in config_target and target_name in ['x86_64', 'aarch64']
