@@ -31,6 +31,7 @@
 #include "hw/core/qdev.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/panda-modules.h"
+#include "hw/core/configurable-cpu.h"
 #include "hw/arm/machines-qom.h"
 #include "hw/riscv/machines-qom.h"
 #include "monitor/qdev.h"
@@ -39,6 +40,7 @@
 #include "elf.h"
 
 #define TYPE_CONFIGURABLE_MACHINE MACHINE_TYPE_NAME("configurable")
+#define CONFIGURABLE_NAME_MAX 128
 OBJECT_DECLARE_SIMPLE_TYPE(ConfigurableMachineState, CONFIGURABLE_MACHINE)
 
 struct ConfigurableMachineState {
@@ -52,6 +54,7 @@ struct ConfigurableMachineState {
     uint64_t ram_base;
 
     CPUState *cpu;
+    const ConfigurableCpuOps *cpu_ops;
     MemoryRegion *mrs;          /* one per region, in list order */
     unsigned nregions;
 };
@@ -210,6 +213,12 @@ static bool configurable_init_regions(ConfigurableMachineState *cms,
 
     /* Names first, so an alias may name a region listed after it. */
     for (l = cms->regions, i = 0; l; l = l->next, i++) {
+        /* RAMBlock ids ("configurable.<name>") are cut at 256 bytes. */
+        if (strlen(l->value->name) > CONFIGURABLE_NAME_MAX) {
+            error_setg(errp, "region[%u]: name '%.20s...' is longer than %d "
+                       "characters", i, l->value->name, CONFIGURABLE_NAME_MAX);
+            return false;
+        }
         if (region_index(cms, l->value->name) != i) {
             error_setg(errp, "region[%u]: name '%s' is used twice", i,
                        l->value->name);
@@ -407,6 +416,11 @@ static bool configurable_init_devices(ConfigurableMachineState *cms,
             return false;
         }
 
+        if (d->id && g_str_equal(d->id, "cpu")) {
+            error_setg(errp, "%s: id 'cpu' is taken (irq 'cpu:N' names the "
+                       "CPU)", what);
+            return false;
+        }
         dev = qdev_new(d->type);
         if (d->id && !qdev_set_id(dev, g_strdup(d->id), errp)) {
             error_prepend(errp, "%s: ", what);
@@ -428,6 +442,8 @@ static bool configurable_init_devices(ConfigurableMachineState *cms,
             return false;
         }
         devs[i] = dev;
+        /* Built in or from a module: fast restore only restores vmstate. */
+        panda_device_check_vmstate(dev, "savevm and fast restore");
 
         j = 0;
         for (uint64List *m = d->mmio; m; m = m->next, j++) {
@@ -481,6 +497,7 @@ static bool configurable_wire_irqs(ConfigurableMachineState *cms,
             DeviceState *target;
             uint64_t n;
             int nin;
+            bool cpu_irqs;
 
             if (!*s->value) {
                 continue;
@@ -501,14 +518,18 @@ static bool configurable_wire_irqs(ConfigurableMachineState *cms,
                            what, name);
                 return false;
             }
-            nin = gpio_in_count(target);
+            /* MIPS's CPU inputs are env->irq[], not GPIOs. */
+            cpu_irqs = target == DEVICE(cms->cpu) && cms->cpu_ops->irq_count;
+            nin = cpu_irqs ? cms->cpu_ops->irq_count(cms->cpu)
+                           : gpio_in_count(target);
             if (n >= nin) {
                 error_setg(errp, "%s: %s has %d interrupt input(s), no input "
                            "%" PRIu64, what, name, nin, n);
                 return false;
             }
             sysbus_connect_irq(SYS_BUS_DEVICE(devs[i]), j,
-                               qdev_get_gpio_in(target, n));
+                               cpu_irqs ? cms->cpu_ops->irq_in(cms->cpu, n)
+                                        : qdev_get_gpio_in(target, n));
         }
     }
     return true;
@@ -519,6 +540,9 @@ static void configurable_cpu_reset(void *opaque)
     ConfigurableMachineState *cms = opaque;
 
     cpu_reset(cms->cpu);
+    if (cms->cpu_ops->reset) {
+        cms->cpu_ops->reset(cms->cpu);
+    }
     if (cms->has_entry) {
         cpu_set_pc(cms->cpu, cms->entry);
     }
@@ -533,7 +557,15 @@ static bool configurable_load_kernel(ConfigurableMachineState *cms,
 
     size = load_elf(ms->kernel_filename, NULL, NULL, NULL, &entry, NULL, NULL,
                     NULL, target_big_endian() ? ELFDATA2MSB : ELFDATA2LSB,
-                    EM_NONE, 0, 0);
+                    cms->cpu_ops->elf_machine(cms->cpu), 0, 0);
+    if (size < 0 && size != ELF_LOAD_NOT_ELF) {
+        /* An ELF, but not one for this CPU (machine, endianness, size). */
+        error_setg(errp, "-kernel %s: %s (this CPU takes ELF machine %d, "
+                   "%s-endian)", ms->kernel_filename, load_elf_strerror(size),
+                   cms->cpu_ops->elf_machine(cms->cpu),
+                   target_big_endian() ? "big" : "little");
+        return false;
+    }
     if (size < 0) {
         if (!cms->has_ram_base) {
             error_setg(errp, "-kernel %s: not an ELF file, and a raw image "
@@ -561,11 +593,22 @@ static bool configurable_build(ConfigurableMachineState *cms, Error **errp)
     g_autoptr(GPtrArray) map = g_ptr_array_new_with_free_func(map_entry_free);
     g_autofree DeviceState **devs = NULL;
 
+    cms->cpu_ops = configurable_cpu_ops();
+    if (!cms->cpu_ops) {
+        error_setg(errp, "no CPU setup for target %s (timers, interrupt "
+                   "inputs) yet", target_name());
+        error_append_hint(errp, "hw/core/configurable-cpu.c lists the "
+                          "targets it supports.\n");
+        return false;
+    }
     if (!ms->cpu_type) {
         error_setg(errp, "no CPU type: give one with -cpu");
         return false;
     }
-    cms->cpu = cpu_create(ms->cpu_type);
+    cms->cpu = cms->cpu_ops->create(ms->cpu_type, errp);
+    if (!cms->cpu) {
+        return false;
+    }
 
     if (cms->has_ram_base) {
         if (!ms->ram) {
@@ -588,7 +631,6 @@ static bool configurable_build(ConfigurableMachineState *cms, Error **errp)
         return false;
     }
     qemu_register_reset(configurable_cpu_reset, cms);
-    panda_modules_check_vmstate("savevm and fast restore");
     return true;
 }
 
@@ -601,6 +643,17 @@ static void configurable_init(MachineState *ms)
         error_report_err(err);
         exit(EXIT_FAILURE);
     }
+}
+
+/* The machine reads its properties once, in init: later sets do nothing. */
+static bool configurable_settable(const char *name, Error **errp)
+{
+    if (phase_check(PHASE_MACHINE_INITIALIZED)) {
+        error_setg(errp, "configurable machine: '%s' can't change once the "
+                   "machine is built", name);
+        return false;
+    }
+    return true;
 }
 
 static void configurable_get_regions(Object *obj, Visitor *v, const char *name,
@@ -617,7 +670,8 @@ static void configurable_set_regions(Object *obj, Visitor *v, const char *name,
     ConfigurableMachineState *cms = CONFIGURABLE_MACHINE(obj);
     PandaMachineRegionList *list;
 
-    if (!visit_type_PandaMachineRegionList(v, name, &list, errp)) {
+    if (!configurable_settable(name, errp) ||
+        !visit_type_PandaMachineRegionList(v, name, &list, errp)) {
         return;
     }
     qapi_free_PandaMachineRegionList(cms->regions);
@@ -638,7 +692,8 @@ static void configurable_set_devices(Object *obj, Visitor *v, const char *name,
     ConfigurableMachineState *cms = CONFIGURABLE_MACHINE(obj);
     PandaMachineDeviceList *list;
 
-    if (!visit_type_PandaMachineDeviceList(v, name, &list, errp)) {
+    if (!configurable_settable(name, errp) ||
+        !visit_type_PandaMachineDeviceList(v, name, &list, errp)) {
         return;
     }
     qapi_free_PandaMachineDeviceList(cms->devices);
@@ -660,7 +715,8 @@ static void configurable_set_addr(Object *obj, Visitor *v, const char *name,
     ConfigurableMachineState *cms = CONFIGURABLE_MACHINE(obj);
     uint64_t val;
 
-    if (!visit_type_uint64(v, name, &val, errp)) {
+    if (!configurable_settable(name, errp) ||
+        !visit_type_uint64(v, name, &val, errp)) {
         return;
     }
     if (g_str_equal(name, "entry")) {
