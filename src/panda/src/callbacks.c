@@ -732,7 +732,9 @@ static unsigned panda_tb_shape;
 
 static unsigned panda_translation_shape(void)
 {
-    return (panda_bridge_wants() & (PANDA_BRIDGE_INSN | PANDA_BRIDGE_BLOCK | PANDA_BRIDGE_TB_PC))
+    /* No TB_PC term: block callbacks no longer bind TBs (panda_tb_pc), so a late after_block_translate,
+     * before_tcg_codegen or cpu_restore_state needs no flush. */
+    return (panda_bridge_wants() & (PANDA_BRIDGE_INSN | PANDA_BRIDGE_BLOCK))
            | (unsigned) panda_memcb_rw(false) << 8
            | (unsigned) panda_memcb_rw(true) << 16;
 }
