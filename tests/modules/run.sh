@@ -75,10 +75,22 @@ cross() {  # cross MODULE-TARGET ENGINE-TARGET
        'grep -q "ext-$m.so: built for target $m, this engine is $e" "$OUT/6-$m-$e.out" && grep -q "panda-board-cc $e-softmmu" "$OUT/6-$m-$e.out"'
 }
 cross arm aarch64
+[ -f "$OUT/ext-arm.so" ] && {
+  PANDA_MODULE_ABI=ignore timeout 20 "$Q" -display none -module "$OUT/ext-arm.so" -M none > "$OUT/6-ignore.out" 2>&1; rc=$?
+  ok "PANDA_MODULE_ABI=ignore does not override a target mismatch (rc=$rc)" \
+     '[ $rc = 1 ] && grep -q "built for target arm, this engine is aarch64" "$OUT/6-ignore.out" && ! grep -q "loading anyway" "$OUT/6-ignore.out"'
+}
 cross mips mipsel
 cross mipsel mips
 cross ppc ppc64
 cross riscv32 riscv64
+
+# a module from the first SDK (a bare panda_module_abi string, no panda_module_info)
+echo 'const char panda_module_abi[] = "0123456789abcdef";' > "$OUT/oldsdk.c"
+cc -shared -fPIC -o "$OUT/oldsdk.so" "$OUT/oldsdk.c"
+run -module "$OUT/oldsdk.so" -M none > "$OUT/6-old.out" 2>&1
+ok "a module from the older SDK: rebuild it, not 'not a panda module'" \
+   'grep -q "built with an older panda SDK" "$OUT/6-old.out" && grep -q "Rebuild it with this engine" "$OUT/6-old.out"'
 
 # 7. type name clashes
 "$SDK/bin/panda-board-cc" aarch64-softmmu -o "$OUT/ext-clash.so" "$H/ext-clash.c"
