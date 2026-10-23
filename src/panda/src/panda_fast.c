@@ -73,6 +73,7 @@ static struct {
     uint64_t snaps, restores, full_restores;
     uint64_t last_pages;        /* pages copied by the last restore */
     bool last_full;
+    int64_t last_reset_us, last_ram_us, last_dev_us;  /* the last restore's parts */
 } fast_stats;
 
 static size_t page_size(void) { return qemu_target_page_size(); }
@@ -337,6 +338,7 @@ int panda_fast_snap(void) {
 int panda_fast_restore(void) {
     CPUState *cs;
     bool full;
+    int64_t t0, t1, t2;
     uint64_t pages = 0;
 
     if (!fast_blocks || !fast_dev) {
@@ -359,7 +361,9 @@ int panda_fast_restore(void) {
      * arm virt DTB at the base of RAM, which the guest has reused by now. loadvm does the same
      * (reset, then the RAM section). Those writes are logged, so the walk below undoes them.
      */
+    t0 = g_get_monotonic_time();
     qemu_system_reset(SHUTDOWN_CAUSE_SNAPSHOT_LOAD);
+    t1 = g_get_monotonic_time();
 
     if (full) {
         for (guint i = 0; i < fast_blocks->len; i++) {
@@ -378,6 +382,7 @@ int panda_fast_restore(void) {
         fast_set_sentinels();
         fast_tlb_rearm();
     }
+    t2 = g_get_monotonic_time();
     fast_stats.restores++;
     fast_stats.last_pages = pages;
     fast_stats.last_full = full;
@@ -385,6 +390,9 @@ int panda_fast_restore(void) {
     if (fast_load_devices() < 0) {
         return -1;
     }
+    fast_stats.last_reset_us = t1 - t0;
+    fast_stats.last_ram_us = t2 - t1;
+    fast_stats.last_dev_us = g_get_monotonic_time() - t2;
 #ifdef TARGET_ARM
     /*
      * Recompute the generic timers once every device (the GIC) is loaded, as the KVM->TCG
@@ -439,9 +447,11 @@ const char *panda_fast_info(void) {
 
     n = snprintf(buf, sizeof(buf),
                  "snaps=%" PRIu64 " restores=%" PRIu64 " full_restores=%" PRIu64
-                 " last_pages=%" PRIu64 " last_full=%d tracking=%d blocks=",
+                 " last_pages=%" PRIu64 " last_full=%d last_us=%" PRId64 ",%" PRId64 ",%" PRId64
+                 " tracking=%d blocks=",
                  fast_stats.snaps, fast_stats.restores, fast_stats.full_restores,
-                 fast_stats.last_pages, fast_stats.last_full,
+                 fast_stats.last_pages, fast_stats.last_full, fast_stats.last_reset_us,
+                 fast_stats.last_ram_us, fast_stats.last_dev_us,
                  fast_blocks && fast_tracking_ok());
     for (guint i = 0; fast_blocks && i < fast_blocks->len && n < sizeof(buf); i++) {
         FastBlock *b = &g_array_index(fast_blocks, FastBlock, i);

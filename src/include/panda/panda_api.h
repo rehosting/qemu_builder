@@ -107,7 +107,8 @@ int64_t panda_fast_verify(void);
  * panda_fast_info() - Counters and RAM blocks of the fast snapshot, as "key=value ..." text.
  *
  * snaps, restores, full_restores, last_pages (pages the last restore copied), last_full,
- * tracking, blocks (id:bytes:dirty|compare).
+ * last_us (the last restore's reset,RAM,devices in microseconds), tracking, blocks
+ * (id:bytes:dirty|compare).
  */
 const char *panda_fast_info(void);
 
