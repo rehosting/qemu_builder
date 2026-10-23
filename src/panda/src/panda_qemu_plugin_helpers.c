@@ -10,6 +10,7 @@
 #include "exec/translator.h"
 #include "exec/translation-block.h"
 #include "accel/tcg/cpu-loop.h"
+#include "accel/tcg/cpu-ops.h"
 #include "tcg/tcg.h"
 #include "panda/panda_qemu_plugin_helpers.h"
 #include "panda/hooks.h"
@@ -153,9 +154,27 @@ static void panda_block_invalidate(CPUState *cpu, TranslationBlock *tb, PandaPen
     cpu_loop_exit_noexc(cpu);
 }
 
+/* Without CF_PCREL (mips, ppc, any page with a TCG hook), goto_tb chaining leaves the PC store to
+ * the unchained exit: at a chained block's start the CPU's PC is still that of some earlier block.
+ * Make it this block's, as cpu_tb_exec does for a TB that exits at its entry, before anything reads
+ * it (the callbacks, panda_current_pc, cpu_loop_exit_noexc's next lookup). Such code never reads
+ * the PC from the CPU state, so this changes nothing for the block itself. CF_PCREL code keeps the
+ * PC current. Only here, i.e. only while a block-exec callback is enabled. */
+static inline void panda_block_sync_pc(CPUState *cpu, TranslationBlock *tb){
+    if (!(tb_cflags(tb) & CF_PCREL)) {
+        const TCGCPUOps *ops = cpu->cc->tcg_ops;
+        if (ops->synchronize_from_tb) {
+            ops->synchronize_from_tb(cpu, tb);
+        } else {
+            cpu->cc->set_pc(cpu, tb->pc);
+        }
+    }
+}
+
 void panda_block_start(CPUState *cpu, TranslationBlock *tb){
     PandaPendingBlock *p = cpu->cpu_index < PANDA_END_SLOTS ? &pending[cpu->cpu_index] : NULL;
 
+    panda_block_sync_pc(cpu, tb);   /* also the PC the block before ended with */
     panda_end_block_flush(cpu);     /* the block before this one ran to its end */
     if (unlikely(!p)) {
         panda_callbacks_before_block_exec_dispatch(cpu, tb);

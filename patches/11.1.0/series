@@ -53,3 +53,4 @@
 11.1.0/0053-panda-main_loop_wait-callback-at-each-main-loop-iter.patch
 11.1.0/0054-panda-after_loadvm-callback-when-load_snapshot-succe.patch
 11.1.0/0055-panda-block-callbacks-learn-of-a-longjmp-out-of-the-blo.patch
+11.1.0/0059-panda-after_block_exec-hook-after-the-PC-is-synchron.patch
