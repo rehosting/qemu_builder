@@ -1,0 +1,249 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Fri, 23 Oct 2026 09:38:58 -0400
+Subject: [PATCH] module: load panda modules by path, checked against a panda
+ ABI hash
+
+module_load_path(path, errp) dlopens an external board or device shared
+object (a "panda module"), independent of CONFIG_MODULES, and runs its
+queued type_init()s. QEMU's own module check (the per-build CONFIG_STAMP)
+admits only objects from the same build; a panda module is built against
+the engine's SDK instead, so it carries panda_module_abi, the panda ABI
+hash of the headers it compiled against (qemu/panda-module.h, -include'd
+by the SDK's cflags), and the engine refuses a module whose hash differs
+from its own ("built against panda ABI 3f2a..., this engine is 9c1e...").
+PANDA_MODULE_ABI=ignore makes a mismatch a warning, for bisecting.
+
+The hash (scripts/panda-abi.py, generated into panda-abi.h, rewritten only
+when it changes) covers every header under include/, target/ and hw/, the
+QAPI schema, the trace-events files, configs/targets/*.mak and config-host.h
+without its absolute paths.
+
+With --enable-panda the qemu-system-* executables link with
+--export-dynamic, so a module resolves QEMU's symbols from the executable
+as it does from the engine .so (libpanda-*, libqemu-system-*).
+
+Startup-only: nothing runs unless a module is named.
+
+From the extboard probe (lane-scratch/observe/gate/extboard), with the ABI
+check in place of the probe's none.
+---
+ include/qemu/module.h |  12 +++++
+ meson.build           |  21 +++++++-
+ util/module.c         | 116 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 148 insertions(+), 1 deletion(-)
+
+diff --git a/include/qemu/module.h b/include/qemu/module.h
+index fccf017bf9e805adf03944433d59eecbf2f453ed..386b18b46aa67d2657d2dd229b53ae9a6d5c3576 100644
+--- a/include/qemu/module.h
++++ b/include/qemu/module.h
+@@ -70,6 +70,18 @@ void register_dso_module_init(void (*fn)(void), module_init_type type);
+ 
+ void module_call_init(module_init_type type);
+ 
++/*
++ * module_load_path: load a panda module (an external board, device, ...)
++ * by path, after checking it was built against this engine's ABI (see
++ * module_panda_abi()), and run its init functions.
++ *
++ * Return value:   true on success, false with errp set on error.
++ */
++bool module_load_path(const char *path, Error **errp);
++
++/* module_panda_abi: the ABI hash a panda module must be built against. */
++const char *module_panda_abi(void);
++
+ /*
+  * module_load: attempt to load a module from a set of directories
+  *
+diff --git a/meson.build b/meson.build
+index 1578cee627b4ebd95c24b3ae1a06f96877d0b432..8ae540163c6c2c08dabf9844eef0db3b74701d8c 100644
+--- a/meson.build
++++ b/meson.build
+@@ -3541,6 +3541,19 @@ qemu_version = custom_target('qemu-version.h',
+                              build_always_stale: true)
+ genh += qemu_version
+ 
++# panda-abi.h: the hash panda modules (external boards and devices) are
++# checked against (util/module.c module_load_path); rewritten only when it
++# changes.
++panda_abi = custom_target('panda-abi.h',
++                          output: 'panda-abi.h',
++                          command: [python, files('scripts/panda-abi.py'),
++                                    meson.current_source_dir(),
++                                    meson.current_build_dir()],
++                          capture: true,
++                          build_by_default: true,
++                          build_always_stale: true)
++genh += panda_abi
++
+ hxdep = []
+ hx_headers = [
+   ['qemu-options.hx', 'qemu-options.def'],
+@@ -4449,13 +4462,19 @@ foreach target : target_dirs
+       exe_name += '-unsigned'
+     endif
+ 
++    # A panda module (-M board.so, -module) resolves QEMU's symbols from the
++    # executable as it does from the engine .so: export them.
++    exe_link_args = link_args
++    if get_option('panda') and target.endswith('-softmmu')
++      exe_link_args += cc.get_supported_link_arguments('-Wl,--export-dynamic')
++    endif
+     emulator = executable(exe_name, exe['sources'],
+                install: true,
+                c_args: c_args,
+                dependencies: arch_deps + exe['dependencies'],
+                objects: lib.extract_all_objects(recursive: true),
+                link_depends: [block_syms, qemu_syms],
+-               link_args: link_args,
++               link_args: exe_link_args,
+                win_subsystem: exe['win_subsystem'])
+ 
+     if target.endswith('-softmmu') and 'CONFIG_TCG' in config_target
+diff --git a/util/module.c b/util/module.c
+index 8f8e6994f11256124c9a03a2214b6821e921f1b5..66b8575f6043f3d635cb014c0317e0d9ab056e79 100644
+--- a/util/module.c
++++ b/util/module.c
+@@ -14,18 +14,23 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#ifndef _WIN32
++#include <dlfcn.h>
++#endif
+ #ifdef CONFIG_MODULES
+ #include <gmodule.h>
+ #endif
+ #include "qemu/queue.h"
+ #include "qemu/module.h"
+ #include "qemu/cutils.h"
++#include "qemu/error-report.h"
+ #include "qemu/config-file.h"
+ #include "qapi/error.h"
+ #ifdef CONFIG_MODULE_UPGRADES
+ #include "qemu-version.h"
+ #endif
+ #include "trace.h"
++#include "panda-abi.h"
+ 
+ typedef struct ModuleEntry
+ {
+@@ -112,6 +117,117 @@ void module_call_init(module_init_type type)
+     modules_init_done[type] = true;
+ }
+ 
++const char *module_panda_abi(void)
++{
++    return PANDA_ABI_HASH;
++}
++
++static void module_drop_dso_queue(void)
++{
++    ModuleEntry *e, *next;
++
++    QTAILQ_FOREACH_SAFE(e, &dso_init_list, node, next) {
++        QTAILQ_REMOVE(&dso_init_list, e, node);
++        g_free(e);
++    }
++}
++
++#ifndef _WIN32
++/*
++ * Why @path doesn't load: its undefined symbols, said with the ABI it was
++ * built for when that differs from ours (the usual reason).
++ */
++static void module_explain_failure(const char *path, const char *why,
++                                   Error **errp)
++{
++    void *h = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
++    const char *abi = h ? dlsym(h, "panda_module_abi") : NULL;
++
++    if (abi && strcmp(abi, PANDA_ABI_HASH) != 0) {
++        error_setg(errp, "%s: built against panda ABI %.12s, this engine is "
++                   "%.12s (%s)", path, abi, PANDA_ABI_HASH, why);
++        error_append_hint(errp, "Rebuild it with this engine's SDK.\n");
++    } else {
++        error_setg(errp, "failed to open %s: %s", path, why);
++    }
++    if (h) {
++        module_drop_dso_queue();
++        dlclose(h);
++    }
++}
++#endif
++
++/*
++ * Load an external board or device shared object (a "panda module") by
++ * path, whatever CONFIG_MODULES says. It is built with the SDK's cflags:
++ * -DBUILD_DSO, so its type_init() constructors queue on dso_init_list,
++ * and -include qemu/panda-module.h, which defines panda_module_abi, the
++ * ABI hash of the headers it compiled against. That must equal ours
++ * (PANDA_MODULE_ABI=ignore in the environment makes a mismatch a
++ * warning). RTLD_GLOBAL lets one module use another's symbols.
++ * Startup-only: nothing here runs unless a module is named.
++ */
++bool module_load_path(const char *path, Error **errp)
++{
++#ifdef _WIN32
++    error_setg(errp, "%s: loading modules by path is not supported on this "
++               "host", path);
++    return false;
++#else
++    ModuleEntry *e;
++    const char *abi;
++    void *handle;
++
++    init_lists();
++    module_drop_dso_queue();
++    handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
++    if (!handle) {
++        g_autofree char *why = g_strdup(dlerror());
++        module_explain_failure(path, why, errp);
++        return false;
++    }
++    abi = dlsym(handle, "panda_module_abi");
++    if (!abi || strcmp(abi, PANDA_ABI_HASH) != 0) {
++        const char *ignore = getenv("PANDA_MODULE_ABI");
++
++        if (abi && ignore && g_str_equal(ignore, "ignore")) {
++            warn_report("%s: built against panda ABI %.12s, this engine is "
++                        "%.12s; loading anyway (PANDA_MODULE_ABI=ignore)",
++                        path, abi, PANDA_ABI_HASH);
++        } else {
++            if (abi) {
++                error_setg(errp, "%s: built against panda ABI %.12s, this "
++                           "engine is %.12s", path, abi, PANDA_ABI_HASH);
++                error_append_hint(errp,
++                                  "Rebuild it with this engine's SDK.\n");
++            } else {
++                error_setg(errp, "%s is not a panda module (no "
++                           "panda_module_abi)", path);
++                error_append_hint(errp, "Build it with the SDK's cflags "
++                                  "(-DBUILD_DSO -include "
++                                  "qemu/panda-module.h).\n");
++            }
++            module_drop_dso_queue();
++            dlclose(handle);
++            return false;
++        }
++    }
++    /*
++     * Run the queued inits now if their phase has passed (type_init after
++     * MODULE_INIT_QOM), else leave them for module_call_init().
++     */
++    QTAILQ_FOREACH(e, &dso_init_list, node) {
++        if (modules_init_done[e->type]) {
++            e->init();
++        } else {
++            register_module_init(e->init, e->type);
++        }
++    }
++    module_drop_dso_queue();
++    return true;
++#endif
++}
++
+ #ifdef CONFIG_MODULES
+ 
+ static const QemuModinfo module_info_stub[] = { {

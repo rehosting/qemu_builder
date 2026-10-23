@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Fri, 23 Oct 2026 09:38:58 -0400
+Subject: [PATCH] hw/core: build the configurable machine and its QAPI schema
+
+Wires in the overlay's hw/core/configurable-machine.c and
+qapi/panda-machine.json: a built-in machine, "configurable", for every
+target, whose memory map (RAM, ROM, unimplemented-peripheral and alias
+regions, file-backed contents), peripherals (any bus-less or system bus
+device type, by QOM type, with MMIO bases, IRQ wiring and properties),
+CPU (-cpu) and entry point are machine properties set before machine init.
+The list-valued properties use QAPI types, as the machine's smp-cache
+does, so -M configurable,region.0.base=...,device.0.type=... is parsed and
+type-checked by the generated visitors, and the same value can be set over
+QMP in preconfig. pandare2's MachineBuilder writes them.
+---
+ hw/core/meson.build   | 1 +
+ qapi/meson.build      | 1 +
+ qapi/qapi-schema.json | 1 +
+ 3 files changed, 3 insertions(+)
+
+diff --git a/hw/core/meson.build b/hw/core/meson.build
+index 8737666bbb1a91ff2e43a242aedfd1220430ea96..e8175325bb9707f9118ed3c023ca8b32b6d5cc18 100644
+--- a/hw/core/meson.build
++++ b/hw/core/meson.build
+@@ -37,6 +37,7 @@ system_ss.add(files(
+   'machine.c',
+   'nmi.c',
+   'null-machine.c',
++  'configurable-machine.c',
+   'panda-modules.c',
+   'numa.c',
+   'qdev-fw.c',
+diff --git a/qapi/meson.build b/qapi/meson.build
+index a46269b5a0c926cc99051d2f9cbfe477e4c5da57..062646dea2aec296cb2fbf7d35a4b6215b43eefe 100644
+--- a/qapi/meson.build
++++ b/qapi/meson.build
+@@ -67,6 +67,7 @@ if have_system
+     'rocker',
+     'misc-arm',
+     'misc-i386',
++    'panda-machine',
+     'tpm',
+     'uefi',
+   ]
+diff --git a/qapi/qapi-schema.json b/qapi/qapi-schema.json
+index b93dd68d94c63d451fd69f96bc2065f93ce78447..a01e03679c7c856e70795229fe863a660d5bc497 100644
+--- a/qapi/qapi-schema.json
++++ b/qapi/qapi-schema.json
+@@ -76,3 +76,4 @@
+ { 'include': 'cryptodev.json' }
+ { 'include': 'cxl.json' }
+ { 'include': 'uefi.json' }
++{ 'include': 'panda-machine.json' }
