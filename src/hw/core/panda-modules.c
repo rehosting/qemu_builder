@@ -110,12 +110,15 @@ char *panda_module_machine_spec(const char *spec, Error **errp)
     }
     for (guint i = 0; i < types->len; i++) {
         ObjectClass *oc = object_class_by_name(types->pdata[i]);
-        MachineClass *mc = (MachineClass *)
-            object_class_dynamic_cast(oc, target_machine_typename());
+        MachineClass *mc;
 
-        if (!mc || object_class_is_abstract(oc)) {
+        /* A machine type of this target (it implements the target's interface). */
+        if (!object_class_dynamic_cast(oc, TYPE_MACHINE) ||
+            !object_class_dynamic_cast(oc, target_machine_typename()) ||
+            object_class_is_abstract(oc)) {
             continue;
         }
+        mc = MACHINE_CLASS(oc);
         g_string_append_printf(names, " %s", mc->name);
         if (!want || g_str_equal(want, mc->name)) {
             name = mc->name;
