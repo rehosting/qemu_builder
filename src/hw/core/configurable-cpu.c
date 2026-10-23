@@ -10,7 +10,8 @@
  * Set up here (tested by pandare2's tests/machine.py and tests/machine_raw.sh):
  * arm, aarch64, riscv32 (untested), riscv64 (generic CPU, GPIO interrupt
  * inputs; no ACLINT, so rdtime traps), mips, mipsel, mips64, mips64el (CP0
- * Count/Compare, 8 interrupt lines), ppc, ppc64 (timebase, decrementer),
+ * Count/Compare, 8 interrupt lines), ppc, ppc64 (timebase, decrementer;
+ * BookE/e500/440, 40x and PPE42 CPUs get their families' timers),
  * i386, x86_64 (no interrupt inputs).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -28,6 +29,7 @@
 #include "hw/core/qdev-clock.h"
 #elif defined(TARGET_PPC)
 #include "hw/ppc/ppc.h"
+#include "exec/cputlb.h"
 #endif
 
 static G_GNUC_UNUSED CPUState *generic_create(const char *cpu_type,
@@ -147,16 +149,57 @@ static CPUState *ppc_create(const char *cpu_type, Error **errp)
 {
     CPUState *cs = generic_create(cpu_type, errp);
 
-    if (cs) {
-        /* The timebase and decrementer (env->tb_env), as boards do. */
-        cpu_ppc_tb_init(cpu_env(cs), CONFIGURABLE_PPC_TB_HZ);
+    CPUPPCState *env;
+
+    if (!cs) {
+        return NULL;
+    }
+    /*
+     * The timebase and decrementer (env->tb_env), as that CPU family's
+     * boards set them up: BookE (e500, 440) and 40x keep their FIT/watchdog
+     * (and 40x PIT) state behind tb_env->opaque, which a guest write to
+     * TCR or PIT dereferences.
+     */
+    env = cpu_env(cs);
+    switch (env->excp_model) {
+    case POWERPC_EXCP_BOOKE:
+        ppc_booke_timers_init(POWERPC_CPU(cs), CONFIGURABLE_PPC_TB_HZ,
+                              env->mmu_model == POWERPC_MMU_BOOKE206 ?
+                              PPC_TIMER_E500 : 0);
+        break;
+    case POWERPC_EXCP_PPE42:
+        ppc_booke_timers_init(POWERPC_CPU(cs), CONFIGURABLE_PPC_TB_HZ,
+                              PPC_TIMER_PPE);
+        break;
+    case POWERPC_EXCP_40x:
+        ppc_40x_timers_init(env, CONFIGURABLE_PPC_TB_HZ, PPC_INTERRUPT_PIT);
+        break;
+    default:
+        cpu_ppc_tb_init(env, CONFIGURABLE_PPC_TB_HZ);
+        break;
     }
     return cs;
 }
 
 static void ppc_reset(CPUState *cs)
 {
-    cpu_ppc_tb_reset(cpu_env(cs));
+    CPUPPCState *env = cpu_env(cs);
+
+    cpu_ppc_tb_reset(env);
+    if (env->mmu_model == POWERPC_MMU_BOOKE206) {
+        /*
+         * e500's MMU is always on and QEMU resets its TLBs empty, so no
+         * code could run. As e500 boards do: TLB1 entry 0 maps the first
+         * 1 GiB one to one (supervisor and user, read/write/execute).
+         */
+        ppcmas_tlb_t *tlb = booke206_get_tlbm(env, 1, 0, 0);
+
+        tlb->mas1 = MAS1_VALID | (20 << MAS1_TSIZE_SHIFT);  /* 2^20 KiB */
+        tlb->mas2 = 0;
+        tlb->mas7_3 = MAS3_UR | MAS3_UW | MAS3_UX | MAS3_SR | MAS3_SW |
+                      MAS3_SX;
+        tlb_flush(cs);
+    }
 }
 
 static int ppc_elf_machine(CPUState *cpu)
