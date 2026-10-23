@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Fri, 23 Oct 2026 14:19:49 -0400
+Subject: [PATCH] plugins: faulting accesses treat a page without a host
+ pointer as I/O
+
+vaddr_ranges_fault (patches 0013/0015/0017) tested only TLB_MMIO, then
+copied through the host pointer.  On QEMU 11.1.0 probe_access_internal
+folds every slow bit into TLB_MMIO and returns NULL host only then, so
+this was equivalent.  Upstream 827802a ("Use TLB_FORCE_SLOW not TLB_MMIO
+for system plugins", in 11.1.2) returns the raw flags with host NULL
+instead: a store to a ROM page (TLB_DISCARD_WRITE) or any other slow page
+would memcpy through NULL.  Treat a NULL host as I/O, as syscall-trap.c's
+sc_writable already does.  No change on 11.1.0.
+---
+ plugins/api-system.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/plugins/api-system.c b/plugins/api-system.c
+index b9fa9b859ff5574265bb3ff3076d541107654cfb..a4f838394b7c6a13b53950f44f0db4ede3afd392 100644
+--- a/plugins/api-system.c
++++ b/plugins/api-system.c
+@@ -454,8 +454,15 @@ static int vaddr_ranges_fault(VaddrRange *r, size_t n,
+                     }
+                     continue;
+                 }
+-                if (flags & TLB_MMIO) {
+-                    /* Not RAM: an access could have device side effects. */
++                if ((flags & TLB_MMIO) || !host) {
++                    /*
++                     * Not RAM: an access could have device side effects.
++                     * Test the host pointer too: from QEMU 11.1.2 on
++                     * (827802a, TLB_FORCE_SLOW), probe_access_internal
++                     * returns the slow bits (TLB_DISCARD_WRITE for a ROM
++                     * store ...) as they are with *phost NULL, instead of
++                     * folding them into TLB_MMIO.
++                     */
+                     ret = QEMU_PLUGIN_VADDR_IO;
+                     break;
+                 }

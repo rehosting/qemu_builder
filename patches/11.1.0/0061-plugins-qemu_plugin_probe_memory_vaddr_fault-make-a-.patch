@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Fri, 23 Oct 2026 14:21:53 -0400
+Subject: [PATCH] plugins: qemu_plugin_probe_memory_vaddr_fault, make a range
+ accessible without copying
+
+The faulting read/write calls check every page (raising a guest fault for
+the first inaccessible one) and then copy.  The probe is the first pass
+alone.  PANDA's opt-in page-in path needs it: a Python callback learns which
+page it wants but must not be left by longjmp (the interpreter's frames
+would be skipped), so the PANDA bridge raises the fault after the callback
+has returned, from its own C callback; for a write it must make the page
+writable without writing anything yet.
+---
+ include/plugins/qemu-plugin.h | 26 ++++++++++++++++++++++++++
+ plugins/api-system.c          | 33 ++++++++++++++++++++++++---------
+ plugins/api-user.c            |  8 ++++++++
+ 3 files changed, 58 insertions(+), 9 deletions(-)
+
+diff --git a/include/plugins/qemu-plugin.h b/include/plugins/qemu-plugin.h
+index 9c509144d41cadd41e5a75164ae75196f081b400..9a8e94e6b6ed3adde0905cfde28a29e768933f1a 100644
+--- a/include/plugins/qemu-plugin.h
++++ b/include/plugins/qemu-plugin.h
+@@ -1338,6 +1338,32 @@ int qemu_plugin_access_memory_vaddr_fault(struct qemu_plugin_vaddr_op *ops,
+                                           enum qemu_plugin_vaddr_mode mode,
+                                           bool fault, size_t *failed_op);
+ 
++/**
++ * qemu_plugin_probe_memory_vaddr_fault() - make guest memory accessible
++ *
++ * @addr: guest virtual address
++ * @len: number of bytes
++ * @write: make the range writable (else readable)
++ * @mode: privilege used for translation
++ * @fault: if a page is not accessible, raise a guest fault
++ *
++ * The first half of qemu_plugin_read_memory_vaddr_fault() or
++ * qemu_plugin_write_memory_vaddr_fault(): every page of the range is
++ * checked, and with @fault the first one that is not accessible is handed
++ * to the guest as a load or store fault (which does not return, as there),
++ * but nothing is copied.  For a caller that learns which page it needs
++ * inside a callback that must not be left by longjmp (one running an
++ * interpreter, say) and raises the fault later, from a callback of its own
++ * that may.
++ *
++ * Returns a qemu_plugin_vaddr_result.
++ */
++QEMU_PLUGIN_API
++int qemu_plugin_probe_memory_vaddr_fault(uint64_t addr, size_t len,
++                                         bool write,
++                                         enum qemu_plugin_vaddr_mode mode,
++                                         bool fault);
++
+ /**
+  * typedef qemu_plugin_vcpu_bp_cb_t - breakpoint callback
+  *
+diff --git a/plugins/api-system.c b/plugins/api-system.c
+index a4f838394b7c6a13b53950f44f0db4ede3afd392..6966e0d158fc09673e26d20218af6ba4d518e772 100644
+--- a/plugins/api-system.c
++++ b/plugins/api-system.c
+@@ -286,7 +286,7 @@ typedef struct VaddrRange {
+ 
+ static int vaddr_ranges_hw(CPUState *cpu, VaddrRange *r, size_t n,
+                            enum qemu_plugin_vaddr_mode mode, bool fault,
+-                           size_t *failed)
++                           size_t *failed, int passes)
+ {
+     bool user = mode == QEMU_PLUGIN_VADDR_USER;
+     size_t page_size = qemu_target_page_size();
+@@ -299,7 +299,7 @@ static int vaddr_ranges_hw(CPUState *cpu, VaddrRange *r, size_t n,
+     uint64_t key = cpu->cc->get_pc(cpu);   /* state is synchronized */
+ 
+     uaccess_open(cpu, &win, key);
+-    for (int copy = 0; copy < 2 && ret == QEMU_PLUGIN_VADDR_OK; copy++) {
++    for (int copy = 0; copy < passes && ret == QEMU_PLUGIN_VADDR_OK; copy++) {
+         for (size_t i = 0; i < n && ret == QEMU_PLUGIN_VADDR_OK; i++) {
+             bool is_write = r[i].access_type == MMU_DATA_STORE;
+             size_t done = 0;
+@@ -363,11 +363,13 @@ static int vaddr_ranges_hw(CPUState *cpu, VaddrRange *r, size_t n,
+  * Make every page of every range accessible for its access type, then copy
+  * all of them.  Checking all pages before copying anything means a fault on
+  * a later page never leaves the guest looking at a partial write, and the
+- * reads are taken while no guest code runs on this vCPU.
++ * reads are taken while no guest code runs on this vCPU.  @passes is 2
++ * (make accessible, then copy), or 1 to make accessible only (a probe:
++ * nothing is copied, @r's buffers are not used).
+  */
+ static int vaddr_ranges_fault(VaddrRange *r, size_t n,
+                               enum qemu_plugin_vaddr_mode mode, bool fault,
+-                              size_t *failed)
++                              size_t *failed, int passes)
+ {
+     CPUState *cpu = current_cpu;
+     CPUArchState *env;
+@@ -378,7 +380,7 @@ static int vaddr_ranges_fault(VaddrRange *r, size_t n,
+ 
+     g_assert(cpu);
+     if (!tcg_enabled()) {
+-        return vaddr_ranges_hw(cpu, r, n, mode, fault, failed);
++        return vaddr_ranges_hw(cpu, r, n, mode, fault, failed, passes);
+     }
+     env = cpu_env(cpu);
+ 
+@@ -395,7 +397,7 @@ static int vaddr_ranges_fault(VaddrRange *r, size_t n,
+         mmu_idx = fault_idx = cpu_mmu_index(cpu, false);
+     }
+ 
+-    for (int copy = 0; copy < 2 && ret == QEMU_PLUGIN_VADDR_OK; copy++) {
++    for (int copy = 0; copy < passes && ret == QEMU_PLUGIN_VADDR_OK; copy++) {
+         for (size_t i = 0; i < n && ret == QEMU_PLUGIN_VADDR_OK; i++) {
+             MMUAccessType access_type = r[i].access_type;
+             size_t done = 0;
+@@ -496,7 +498,7 @@ int qemu_plugin_read_memory_vaddr_fault(uint64_t addr, GByteArray *data,
+     }
+     g_byte_array_set_size(data, len);
+     r.buf = data->data;
+-    return vaddr_ranges_fault(&r, 1, mode, fault, NULL);
++    return vaddr_ranges_fault(&r, 1, mode, fault, NULL, 2);
+ }
+ 
+ int qemu_plugin_write_memory_vaddr_fault(uint64_t addr, GByteArray *data,
+@@ -508,7 +510,7 @@ int qemu_plugin_write_memory_vaddr_fault(uint64_t addr, GByteArray *data,
+     if (data->len == 0) {
+         return QEMU_PLUGIN_VADDR_UNMAPPED;
+     }
+-    return vaddr_ranges_fault(&r, 1, mode, fault, NULL);
++    return vaddr_ranges_fault(&r, 1, mode, fault, NULL, 2);
+ }
+ 
+ int qemu_plugin_access_memory_vaddr_fault(struct qemu_plugin_vaddr_op *ops,
+@@ -538,5 +540,18 @@ int qemu_plugin_access_memory_vaddr_fault(struct qemu_plugin_vaddr_op *ops,
+             ops[i].write ? MMU_DATA_STORE : MMU_DATA_LOAD
+         };
+     }
+-    return vaddr_ranges_fault(r, n, mode, fault, failed_op);
++    return vaddr_ranges_fault(r, n, mode, fault, failed_op, 2);
++}
++
++int qemu_plugin_probe_memory_vaddr_fault(uint64_t addr, size_t len,
++                                         bool write,
++                                         enum qemu_plugin_vaddr_mode mode,
++                                         bool fault)
++{
++    VaddrRange r = { addr, NULL, len, write ? MMU_DATA_STORE : MMU_DATA_LOAD };
++
++    if (len == 0) {
++        return QEMU_PLUGIN_VADDR_UNMAPPED;
++    }
++    return vaddr_ranges_fault(&r, 1, mode, fault, NULL, 1);
+ }
+diff --git a/plugins/api-user.c b/plugins/api-user.c
+index 61e9d76fbf8bfa8f1dd8b1fe362ca4e2ba9e81de..974ce5f4720eab0e2aa38a0b7e747c584e00feb1 100644
+--- a/plugins/api-user.c
++++ b/plugins/api-user.c
+@@ -79,6 +79,14 @@ int qemu_plugin_access_memory_vaddr_fault(struct qemu_plugin_vaddr_op *ops,
+     return QEMU_PLUGIN_VADDR_BAD_MODE;
+ }
+ 
++int qemu_plugin_probe_memory_vaddr_fault(uint64_t addr, size_t len,
++                                         bool write,
++                                         enum qemu_plugin_vaddr_mode mode,
++                                         bool fault)
++{
++    return QEMU_PLUGIN_VADDR_BAD_MODE;
++}
++
+ void qemu_plugin_register_vcpu_bp_cb(qemu_plugin_id_t id,
+                                      qemu_plugin_vcpu_bp_cb_t cb,
+                                      void *userdata)

@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Fri, 23 Oct 2026 14:22:16 -0400
+Subject: [PATCH] plugins: conditional callbacks registered RW_REGS_PC get the
+ return-address trampoline
+
+Patch 0013 entered only unconditional RW_REGS_PC callbacks through the
+trampoline that records the host return address into the TB, so a
+conditional one (qemu_plugin_register_vcpu_tb_exec_cond_cb, PANDA's gated
+block start) could not raise a precise guest fault: the faulting accesses
+saw no return address and failed with QEMU_PLUGIN_VADDR_UNMAPPED.  Enter
+them the same way.  The generated code is the same apart from the callee
+and its argument; callbacks registered with other flags are unchanged.
+---
+ plugins/core.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/plugins/core.c b/plugins/core.c
+index 938e66104b76e89ce94c14c3b846b665e0d373e7..8a6469fbd3c1568cfc02713916e5f5dede39df7e 100644
+--- a/plugins/core.c
++++ b/plugins/core.c
+@@ -368,8 +368,9 @@ void plugin_register_inline_op_on_entry(GArray **arr,
+ }
+ 
+ /*
+- * Callbacks that may leave the TB (QEMU_PLUGIN_CB_RW_REGS_PC) are entered
+- * through a trampoline that records the host return address into the TB.
++ * Callbacks that may leave the TB (QEMU_PLUGIN_CB_RW_REGS_PC), unconditional
++ * or conditional, are entered through a trampoline that records the host
++ * return address into the TB.
+  * With it, APIs called from the callback can unwind the guest state to the
+  * start of the instrumented instruction (cpu_restore_state) and raise a
+  * precise guest exception there, see qemu_plugin_read_memory_vaddr_fault().
+@@ -479,6 +480,11 @@ void plugin_register_dyn_cond_cb__udata(GArray **arr,
+     };
+     assert((unsigned)flags < ARRAY_SIZE(info));
+ 
++    if (flags == QEMU_PLUGIN_CB_RW_REGS_PC) {
++        udata = plugin_cb_ra_record(cb, udata);
++        cb = plugin_cb_ra_trampoline;
++    }
++
+     struct qemu_plugin_dyn_cb *dyn_cb = plugin_get_dyn_cb(arr);
+     struct qemu_plugin_conditional_cb cond_cb = { .userp = udata,
+                                                   .f.vcpu_udata = cb,
