@@ -18,8 +18,11 @@ target ("built for target arm, this engine is aarch64": mips into mipsel
 or riscv32 into riscv64 would otherwise load silently, the hash being the
 same for every target of a build) or against another hash ("built against
 panda ABI 3f2a... (QEMU 11.1.0), this engine is 9c1e..."), before running
-any of its code. PANDA_MODULE_ABI=ignore makes a mismatch a warning, for
-bisecting.
+any of its code. PANDA_MODULE_ABI=ignore makes an ABI mismatch (never a
+target mismatch) a warning, for bisecting. A module from the first SDK
+(a bare panda_module_abi string) is told to rebuild with this SDK. Not
+covered: dlopen() runs a module's plain ELF constructors before the
+check (type_init() under -DBUILD_DSO only queues).
 
 The hash (scripts/panda-abi.py, generated into panda-abi.h, rewritten only
 when it changes) covers every header under include/, target/, hw/,
@@ -43,13 +46,13 @@ otherwise (one test per type registration, at startup).
 From the extboard probe (lane-scratch/observe/gate/extboard), with the ABI
 check in place of the probe's none.
 ---
- include/qemu/module.h |  13 ++++
+ include/qemu/module.h |  13 +++
  include/qom/object.h  |  21 +++++
  meson.build           |  21 ++++-
  plugins/meson.build   |   8 +-
- qom/object.c          |  23 +++++-
- util/module.c         | 175 ++++++++++++++++++++++++++++++++++++++++++
- 6 files changed, 258 insertions(+), 3 deletions(-)
+ qom/object.c          |  23 ++++-
+ util/module.c         | 194 ++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 277 insertions(+), 3 deletions(-)
 
 diff --git a/include/qemu/module.h b/include/qemu/module.h
 index fccf017bf9e805adf03944433d59eecbf2f453ed..dd4450de039c82828be0667c9f4ca64a90c7cbad 100644
@@ -226,7 +229,7 @@ index 001aeaf8e2be7f37bd2b465d6d5b15a8c5dd562e..79e7d9454572942aa277dfa240fd71df
  }
  
 diff --git a/util/module.c b/util/module.c
-index 8f8e6994f11256124c9a03a2214b6821e921f1b5..ae3d21c21af3f42751fb6e1c89229b60d2743cfd 100644
+index 8f8e6994f11256124c9a03a2214b6821e921f1b5..e05a2a997db2322f03c7def342f33690c7b23103 100644
 --- a/util/module.c
 +++ b/util/module.c
 @@ -14,18 +14,24 @@
@@ -254,7 +257,7 @@ index 8f8e6994f11256124c9a03a2214b6821e921f1b5..ae3d21c21af3f42751fb6e1c89229b60
  
  typedef struct ModuleEntry
  {
-@@ -112,6 +118,175 @@ void module_call_init(module_init_type type)
+@@ -112,6 +118,194 @@ void module_call_init(module_init_type type)
      modules_init_done[type] = true;
  }
  
@@ -284,6 +287,13 @@ index 8f8e6994f11256124c9a03a2214b6821e921f1b5..ae3d21c21af3f42751fb6e1c89229b60
 +{
 +    const PandaModuleInfo *info = dlsym(handle, "panda_module_info");
 +
++    if (!info && dlsym(handle, "panda_module_abi")) {
++        /* The first SDK's stamp: a bare hash string, no target. */
++        error_setg(errp, "%s was built with an older panda SDK (it has "
++                   "panda_module_abi, not panda_module_info)", path);
++        error_append_hint(errp, "Rebuild it with this engine's SDK.\n");
++        return NULL;
++    }
 +    if (!info || info->magic != PANDA_MODULE_INFO_MAGIC) {
 +        error_setg(errp, "%s is not a panda module (no panda_module_info)",
 +                   path);
@@ -329,7 +339,12 @@ index 8f8e6994f11256124c9a03a2214b6821e921f1b5..ae3d21c21af3f42751fb6e1c89229b60
 +                              info->qemu_version, PANDA_ABI_HASH,
 +                              QEMU_VERSION);
 +    }
-+    if (ignore && g_str_equal(ignore, "ignore")) {
++    /*
++     * Only an ABI mismatch can be overridden (for bisecting): a module
++     * compiled for another target has another target_ulong, CPUArchState
++     * and config, and is never safe to run.
++     */
++    if (!bad_target && ignore && g_str_equal(ignore, "ignore")) {
 +        warn_report("%s: %s; loading anyway (PANDA_MODULE_ABI=ignore)", path,
 +                    why);
 +        return true;
@@ -382,8 +397,15 @@ index 8f8e6994f11256124c9a03a2214b6821e921f1b5..ae3d21c21af3f42751fb6e1c89229b60
 + * ABI hash of the headers it compiled against and the target it compiled
 + * for. Both must equal ours (@target is this engine's target name, or
 + * NULL not to check it; PANDA_MODULE_ABI=ignore in the environment makes
-+ * a mismatch a warning). RTLD_GLOBAL lets one module use another's
-+ * symbols. Startup-only: nothing here runs unless a module is named.
++ * an ABI mismatch, never a target mismatch, a warning). RTLD_GLOBAL lets
++ * one module use another's symbols. Startup-only: nothing here runs
++ * unless a module is named.
++ *
++ * What the check can't stop: dlopen() itself runs the module's plain ELF
++ * constructors (__attribute__((constructor)), C++ static initialisers)
++ * before panda_module_info is read. type_init() under -DBUILD_DSO only
++ * queues, so QOM registration waits for the check, but other constructor
++ * code in a module runs even when the module is then refused.
 + */
 +bool module_load_path(const char *path, const char *target, Error **errp)
 +{
