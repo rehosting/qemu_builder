@@ -135,13 +135,18 @@ int panda_fast_restore(void) {
     if (runstate_is_running()) {
         vm_stop(RUN_STATE_RESTORE_VM);
     }
+    /*
+     * Reset first, then RAM: reset re-copies ROM blobs that live in RAM (rom_reset), e.g. the
+     * arm virt DTB at the base of RAM, which the guest has reused by now. loadvm does the same
+     * (reset, then the RAM section).
+     */
+    qemu_system_reset(SHUTDOWN_CAUSE_SNAPSHOT_LOAD);
     for (guint i = 0; i < fast_ram->len; i++) {
         FastRAM *r = &g_array_index(fast_ram, FastRAM, i);
         memcpy(qemu_ram_get_host_addr(r->rb), r->copy, r->len);
     }
     tb_flush__exclusive_or_serial();  /* code in RAM may have changed under the TBs */
 
-    qemu_system_reset(SHUTDOWN_CAUSE_SNAPSHOT_LOAD);
     bioc = qio_channel_buffer_new(fast_dev_len);
     memcpy(bioc->data, fast_dev, fast_dev_len);
     bioc->usage = fast_dev_len;
