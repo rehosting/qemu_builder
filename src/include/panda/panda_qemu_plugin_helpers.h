@@ -36,7 +36,10 @@ void panda_block_start(CPUState *cpu, TranslationBlock *tb);
 void panda_block_leave_at_start(CPUState *cpu, TranslationBlock *tb);   /* noreturn */
 void panda_end_block_flush(CPUState *cpu);
 void panda_end_block_drop_all(void);
-/* The bridge passes a setter for its gate: 1 while any block-exec callback is enabled. Its block-start
- * callback is conditional on it, so registered-but-disabled callbacks cost a compare per block. */
-void panda_bridge_set_block_gate(void (*set)(uint64_t on));
+/* The bridge passes a setter for its per-vCPU gate words (cpu_index -1: every vCPU's). Its
+ * block-start callback is conditional on the vCPU's word, so registered-but-disabled callbacks cost
+ * a compare per block. Enabling a block-exec callback opens every vCPU's gate at once; disabling
+ * the last one closes a vCPU's gate at its next block start, which ends the block it was running
+ * (its after/end_block_exec run then, if still enabled). panda_block_gate: is one enabled? */
+void panda_bridge_set_block_gate(void (*set)(int cpu_index, uint64_t on));
 uint64_t panda_block_gate(void);

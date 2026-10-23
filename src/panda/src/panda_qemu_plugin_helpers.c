@@ -186,11 +186,36 @@ static inline void panda_block_sync_pc(CPUState *cpu, TranslationBlock *tb){
     }
 }
 
+/* The bridge's gate (see panda_bridge_set_block_gate) */
+static void (*block_gate_set)(int cpu_index, uint64_t on);
+static uint64_t block_gate_on;
+
+/* No block-exec callback is enabled any more: the block before this one has just ended (above), at
+ * a block boundary. Close this vCPU's gate, unless it was opened again meanwhile. Had the gate been
+ * closed for every vCPU at once, a vCPU running chained code would keep its pending block until the
+ * chain returned to cpu_exec or the gate opened again, and an after/end_block_exec enabled by then
+ * would run for it late, with a much later CPU state. */
+static bool panda_block_gate_closed(CPUState *cpu){
+    if (likely(qatomic_read(&block_gate_on)) || !block_gate_set) {
+        return false;
+    }
+    block_gate_set(cpu->cpu_index, 0);
+    smp_mb();
+    if (!qatomic_read(&block_gate_on)) {
+        return true;
+    }
+    block_gate_set(cpu->cpu_index, 1);
+    return false;
+}
+
 void panda_block_start(CPUState *cpu, TranslationBlock *tb){
     PandaPendingBlock *p = cpu->cpu_index < PANDA_END_SLOTS ? &pending[cpu->cpu_index] : NULL;
 
     panda_block_sync_pc(cpu, tb);   /* also the PC the block before ended with */
     panda_end_block_flush(cpu);     /* the block before this one ran to its end */
+    if (unlikely(panda_block_gate_closed(cpu))) {
+        return;
+    }
     if (unlikely(!p)) {
         panda_callbacks_before_block_exec_dispatch(cpu, tb);
         panda_callbacks_start_block_exec(cpu, tb);
@@ -216,10 +241,7 @@ void panda_block_start(CPUState *cpu, TranslationBlock *tb){
 
 /* The bridge's gate: its block-start callback is conditional on a per-vCPU word it owns, which
  * PANDA sets to 1 while any block-exec callback is enabled. */
-static void (*block_gate_set)(uint64_t on);
-static uint64_t block_gate_on;
-
-void panda_bridge_set_block_gate(void (*set)(uint64_t on)){
+void panda_bridge_set_block_gate(void (*set)(int cpu_index, uint64_t on)){
     block_gate_set = set;
     panda_block_cbs_changed();
 }
@@ -246,12 +268,15 @@ void panda_block_cbs_changed(void){
             break;
         }
     }
-    block_gate_on = on;
-    if (block_gate_set) {
-        block_gate_set(on);
+    qatomic_set(&block_gate_on, on);
+    /* Opening is global and immediate. Closing is lazy, per vCPU (panda_block_gate_closed): a
+     * vCPU's gate stays open until its next block start, which ends the block it was running. */
+    if (on && block_gate_set) {
+        smp_mb();
+        block_gate_set(-1, 1);
     }
 }
 
 uint64_t panda_block_gate(void){
-    return block_gate_on;
+    return qatomic_read(&block_gate_on);
 }
