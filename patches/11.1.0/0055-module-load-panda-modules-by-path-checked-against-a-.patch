@@ -30,8 +30,9 @@ check in place of the probe's none.
 ---
  include/qemu/module.h |  12 +++++
  meson.build           |  21 +++++++-
+ plugins/meson.build   |   8 ++-
  util/module.c         | 118 ++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 150 insertions(+), 1 deletion(-)
+ 4 files changed, 157 insertions(+), 2 deletions(-)
 
 diff --git a/include/qemu/module.h b/include/qemu/module.h
 index fccf017bf9e805adf03944433d59eecbf2f453ed..386b18b46aa67d2657d2dd229b53ae9a6d5c3576 100644
@@ -101,6 +102,25 @@ index 1578cee627b4ebd95c24b3ae1a06f96877d0b432..8ae540163c6c2c08dabf9844eef0db3b
                 win_subsystem: exe['win_subsystem'])
  
      if target.endswith('-softmmu') and 'CONFIG_TCG' in config_target
+diff --git a/plugins/meson.build b/plugins/meson.build
+index bcf600e41678fa302b0f438e8a1202d80a81a525..e0f19a56cd38cb8f82c8646898c5f50a19274936 100644
+--- a/plugins/meson.build
++++ b/plugins/meson.build
+@@ -10,7 +10,13 @@ qemu_plugin_symbols = configure_file(
+ 
+ # Modules need more symbols than just those in plugins/qemu-plugins.symbols
+ if not enable_modules
+-  if host_os == 'darwin'
++  if host_os == 'darwin' and get_option('panda')
++    # So do panda modules (external boards and devices, -M PATH, -module),
++    # which ld64's exported_symbols_list would hide from: export everything.
++    # (Linux keeps the --dynamic-list: it exports nothing less from a shared
++    # library, it only keeps the library's own calls bound locally, and the
++    # executables add --export-dynamic.)
++  elif host_os == 'darwin'
+     configure_file(
+       input: qemu_plugin_symbols,
+       output: 'qemu-plugins-ld64.symbols',
 diff --git a/util/module.c b/util/module.c
 index 8f8e6994f11256124c9a03a2214b6821e921f1b5..01eac66203dd0995614d877ad9c4795bf13ecdf5 100644
 --- a/util/module.c
