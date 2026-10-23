@@ -37,6 +37,13 @@ void panda_callbacks_before_find_fast(void);
 void panda_callbacks_main_loop_wait(void);
 /* After load_snapshot() restored a snapshot (loadvm, panda_revert, an rr start) */
 void panda_callbacks_after_loadvm(CPUState *env);
+/* Edge coverage (panda_cov.c): translator_loop emits it into each block while it's on */
+extern bool panda_cov_enabled;
+static inline bool panda_cov_on(void)
+{
+    return qatomic_read(&panda_cov_enabled);
+}
+void panda_cov_gen(TranslationBlock *tb, uint64_t pc);
 
 #else
 
@@ -58,6 +65,11 @@ static inline void panda_callbacks_block_longjmp(CPUState *cpu) {}
 static inline void panda_callbacks_before_find_fast(void) {}
 static inline void panda_callbacks_main_loop_wait(void) {}
 static inline void panda_callbacks_after_loadvm(CPUState *env) {}
+static inline bool panda_cov_on(void)
+{
+    return false;
+}
+static inline void panda_cov_gen(TranslationBlock *tb, uint64_t pc) {}
 static inline bool panda_callbacks_asid_changed(CPUState *cpu, uint64_t oldval, uint64_t newval)
 {
     return false;

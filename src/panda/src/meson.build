@@ -4,6 +4,7 @@ specific_ss.add(
         'callbacks.c',
         'cb-support.c',
         'panda_api.c',
+        'panda_cov.c',
         'panda_arch.c',
         'panda_fast.c',
         'panda_mem.c',

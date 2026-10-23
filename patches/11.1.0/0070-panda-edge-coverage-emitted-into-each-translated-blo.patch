@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Fri, 23 Oct 2026 14:14:59 -0400
+Subject: [PATCH] panda: edge coverage emitted into each translated block when
+ on
+
+AFL-style edge coverage for fuzzing (map[prev ^ cur]++, prev = cur >> 1),
+in the generated code so it counts every block however it is entered,
+chained jumps included (a callback from cpu_tb_exec would only see the
+first block of a chain).
+
+translator_loop calls panda_cov_gen() once per block, before the first
+instruction, only while panda_cov_on(): with coverage off (the default,
+and always without --enable-panda, where both are empty inlines) the
+only cost is one load and branch per block *translated*; generated code
+is unchanged. The emitter, the map and the API live in the PANDA
+overlay (src/panda/src/panda_cov.c).
+
+CPUState gains panda_cov_prev, AFL's prev_loc, per vCPU so MTTCG vCPUs
+don't interleave their edges. Generated code reaches it from tcg_env as
+can_do_io is reached (offsetof - sizeof(CPUState)).
+
+Same scheme as rehosting/qemu_builder's fastsnap coverage (patch 0018 on
+workspace/fastsnap), written independently; that one keeps prev in a
+host global and ids from the virtual pc.
+---
+ accel/tcg/translator.c | 12 ++++++++++++
+ include/hw/core/cpu.h  |  2 ++
+ 2 files changed, 14 insertions(+)
+
+diff --git a/accel/tcg/translator.c b/accel/tcg/translator.c
+index d00bd8f21b9dede2204e4067c0f3d180111320f1..376f0bbeb811764ee6704efe2513edf592d8c47d 100644
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -21,6 +21,7 @@
+ #include "disas/disas.h"
+ #include "tb-internal.h"
+ #include "hooks-internal.h"
++#include "panda/hooks.h"
+ 
+ static void set_can_do_io(DisasContextBase *db, bool val)
+ {
+@@ -154,6 +155,17 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
+     ops->tb_start(db, cpu);
+     tcg_debug_assert(db->is_jmp == DISAS_NEXT);  /* no early exit */
+ 
++    /*
++     * Edge coverage, once per block ahead of its first instruction, so it
++     * counts however the block is entered (a chained jump too). Nothing is
++     * emitted unless coverage is on.
++     */
++#ifndef CONFIG_USER_ONLY
++    if (unlikely(panda_cov_on())) {
++        panda_cov_gen(db->tb, db->pc_first);
++    }
++#endif
++
+     plugin_enabled = plugin_gen_tb_start(cpu, db);
+     db->plugin_enabled = plugin_enabled;
+ 
+diff --git a/include/hw/core/cpu.h b/include/hw/core/cpu.h
+index 8033d4470b435a9a0a195b4ed6e10975752a4d12..15acca870bc5e40a2bed4e940c45595c2f2740a0 100644
+--- a/include/hw/core/cpu.h
++++ b/include/hw/core/cpu.h
+@@ -565,6 +565,8 @@ struct CPUState {
+     int32_t exception_index;
+     /* host return address into the block while a TCG hook runs, or 0 */
+     uintptr_t tcg_hook_ra;
++    /* PANDA edge coverage: the previous block's id >> 1 (AFL's prev_loc), read by TCG code */
++    uint32_t panda_cov_prev;
+     /*
+      * A user-access window a plugin memory access opened and left open
+      * across the guest fault it raised (plugins/api-system.c): the access

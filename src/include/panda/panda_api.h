@@ -113,6 +113,73 @@ int64_t panda_fast_verify(void);
 const char *panda_fast_info(void);
 
 
+/**
+ * panda_cov_enable() - Turn on AFL-style edge coverage (map[prev ^ cur]++, prev = cur >> 1).
+ * @map: the hit-count map to fill (e.g. AFL's shared memory), or NULL for one PANDA allocates
+ * @size: its size in bytes, a power of two in [256, 16M]; 0 for 65536
+ *
+ * Every block translated from now on updates the map when it runs (TBs are flushed before the
+ * next lookup). Block ids hash the block's RAM address (stable across processes and fast
+ * restores). The map and size are fixed by the first call for the rest of the process; later
+ * calls pass the same or NULL/0, and @map must stay valid that long. Resets every vCPU's prev.
+ * Off by default; off costs nothing in generated code.
+ * Return: 0, or -1 for a bad size or a different map.
+ */
+int panda_cov_enable(uint8_t *map, uint32_t size);
+
+
+/**
+ * panda_cov_disable() - Stop emitting coverage (TBs are flushed, so the update goes away).
+ */
+void panda_cov_disable(void);
+
+
+/**
+ * panda_cov_is_enabled() - Whether coverage is on.
+ */
+bool panda_cov_is_enabled(void);
+
+
+/**
+ * panda_cov_set_range() - Only blocks whose virtual start is in [@lo, @hi) get coverage.
+ *
+ * @hi 0 removes the filter. A block outside it doesn't update the map or prev. Flushes TBs if on.
+ */
+void panda_cov_set_range(uint64_t lo, uint64_t hi);
+
+
+/**
+ * panda_cov_map() - The coverage map (NULL before the first panda_cov_enable()).
+ */
+uint8_t *panda_cov_map(void);
+
+
+/**
+ * panda_cov_map_size() - The coverage map's size in bytes (0 before the first enable).
+ */
+uint32_t panda_cov_map_size(void);
+
+
+/**
+ * panda_cov_reset() - Zero the map and every vCPU's prev: call before each fuzzing iteration.
+ */
+void panda_cov_reset(void);
+
+
+/**
+ * panda_cov_reset_prev() - Zero every vCPU's prev only (when the map's owner clears the map, as
+ * afl-fuzz does before each run).
+ */
+void panda_cov_reset_prev(void);
+
+
+/**
+ * panda_cov_info() - "key=value ..." text: enabled, size, own_map, lo, hi, tbs (blocks
+ * instrumented), tbs_filtered, enables.
+ */
+const char *panda_cov_info(void);
+
+
 /* Not an API function: RAM changed without dirty bits (loadvm); the next restore copies it all. */
 void panda_fast_ram_untracked(void);
 
