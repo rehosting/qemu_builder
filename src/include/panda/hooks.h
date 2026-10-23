@@ -29,6 +29,8 @@ bool panda_tb_chaining_enabled(void);
 /* Before each TB lookup: unload plugins that asked to be, and flush the TBs if panda_do_flush_tb()
  * asked (it leaves the CPU loop, which then looks the TB up again) */
 void panda_callbacks_before_find_fast(void);
+/* Each main-loop iteration (pandare2 runs its queued snapshot/revert work here) */
+void panda_callbacks_main_loop_wait(void);
 
 #else
 
@@ -47,6 +49,7 @@ static inline bool panda_tb_chaining_enabled(void)
     return true;
 }
 static inline void panda_callbacks_before_find_fast(void) {}
+static inline void panda_callbacks_main_loop_wait(void) {}
 static inline bool panda_callbacks_asid_changed(CPUState *cpu, uint64_t oldval, uint64_t newval)
 {
     return false;

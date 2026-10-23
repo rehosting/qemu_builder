@@ -10,6 +10,8 @@
 // for map_memory
 #include "qapi/error.h"
 #include "migration/vmstate.h"
+#include "migration/snapshot.h"
+#include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "system/memory.h"
 #include "system/address-spaces.h"
@@ -50,36 +52,47 @@ void panda_stop(int code) {
     vm_stop(code);
 }
 
-// void panda_cont(void) {
-// //    printf ("panda_api: cont cpu\n");
-//     panda_exit_loop = false; // is this unnecessary?
-//     vm_start();
-// }
+void panda_cont(void) {
+    vm_start();
+}
 
-// int panda_delvm(char *snapshot_name) {
-//     delvm_name(snapshot_name);
-//     return 1;
-// }
+/*
+ * Snapshots of the running VM, from the main loop (pandare2 queues these on main_loop_wait).
+ * savevm/loadvm stop the VM themselves and leave it stopped; panda_cont() resumes.
+ */
+int panda_snap(char *snapshot_name) {
+    Error *err = NULL;
+    if (!save_snapshot(snapshot_name, true, NULL, false, NULL, &err)) {
+        error_report_err(err);
+        return -1;
+    }
+    return 0;
+}
 
-// void panda_start_pandalog(const char * name) {
-//     pandalog = 1;
-//     pandalog_cc_init_write(name);
-//     printf ("pandalogging to [%s]\n", name);
-// }
+int panda_revert(char *snapshot_name) {
+    Error *err = NULL;
+    if (runstate_is_running()) {
+        vm_stop(RUN_STATE_RESTORE_VM);
+    }
+    if (!load_snapshot(snapshot_name, NULL, false, NULL, &err)) {
+        error_report_err(err);
+        return -1;
+    }
+    return 0;
+}
 
-// int panda_revert(char *snapshot_name) {
-//     int ret = load_vmstate(snapshot_name);
-// //    printf ("Got back load_vmstate ret=%d\n", ret);
-//     return ret;
-// }
+int panda_delvm(char *snapshot_name) {
+    Error *err = NULL;
+    if (!delete_snapshot(snapshot_name, false, NULL, &err)) {
+        error_report_err(err);
+        return -1;
+    }
+    return 0;
+}
 
-// void panda_reset(void) {
-//     qemu_system_reset_request();
-// }
-
-// int panda_snap(char *snapshot_name) {
-//     return save_vmstate(NULL, snapshot_name);
-// }
+void panda_reset(void) {
+    qemu_system_reset_request(SHUTDOWN_CAUSE_HOST_QMP_SYSTEM_RESET);
+}
 
 // void panda_cleanup_record(void){
 //     if(rr_in_record()){
