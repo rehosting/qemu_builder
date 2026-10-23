@@ -7,10 +7,11 @@
  * dereferences NULL in the host. A target with no setup here gets NULL and
  * the machine refuses it, naming the target.
  *
- * Tested targets (tests/machine.py in pandare2, tests/modules/cfgcpu.sh):
- * arm, aarch64, riscv32/64 (generic CPU, GPIO interrupt inputs), mips,
- * mipsel, mips64 (CP0 Count/Compare, 8 interrupt lines), ppc, ppc64
- * (timebase, decrementer), i386, x86_64 (no interrupt inputs).
+ * Set up here (tested by pandare2's tests/machine.py and tests/machine_raw.sh):
+ * arm, aarch64, riscv32 (untested), riscv64 (generic CPU, GPIO interrupt
+ * inputs; no ACLINT, so rdtime traps), mips, mipsel, mips64, mips64el (CP0
+ * Count/Compare, 8 interrupt lines), ppc, ppc64 (timebase, decrementer),
+ * i386, x86_64 (no interrupt inputs).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
