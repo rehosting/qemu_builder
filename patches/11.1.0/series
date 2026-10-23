@@ -59,3 +59,6 @@
 11.1.0/0059-panda-after_block_exec-hook-after-the-PC-is-synchron.patch
 11.1.0/0110-vhost-don-t-turn-dirty-logging-on-in-a-device-that-c.patch
 11.1.0/0111-panda-before_loadvm-hook-before-qemu_loadvm_state-lo.patch
+11.1.0/0080-accel-tcg-cpu_exec_step_atomic-runs-in-an-RCU-read-s.patch
+11.1.0/0081-target-arm-a-snapshot-loads-across-icount-on-off-PMC.patch
+11.1.0/0082-target-riscv-log-hardware-A-D-page-table-updates-as-.patch

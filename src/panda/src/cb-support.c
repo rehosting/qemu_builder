@@ -19,6 +19,9 @@
 
 #define PCB(name) panda_callbacks_ ## name
 
+extern int panda_main_walk_depth;
+void panda_unload_pending(void);
+
 // TODO: macro names should be include return type - bools |= all cb fns, voids don't
 
 // MAKE_REPLAY_ONLY_CALLBACK(REPLAY_HD_TRANSFER, replay_hd_transfer,
@@ -111,9 +114,13 @@ MAKE_CALLBACK(void, BEFORE_CPU_EXEC_EXIT, before_cpu_exec_exit,
 // Not macroized. (A fast restore learns that loadvm rewrote RAM from panda_before_loadvm.)
 void PCB(after_loadvm)(CPUState *env) {
     panda_cb_list *plist;
+    panda_main_walk_depth++;
     for (plist = panda_cbs[PANDA_CB_AFTER_LOADVM]; plist != NULL; plist = panda_cb_list_next(plist)) {
         if (plist->enabled)
             plist->entry.after_loadvm(plist->context, env);
+    }
+    if (--panda_main_walk_depth == 0) {
+        panda_unload_pending();
     }
 }
 void panda_cb_trampoline_after_loadvm(void* context, CPUState *env) {
@@ -325,9 +332,41 @@ MAKE_CALLBACK(void, CPU_RESTORE_STATE, cpu_restore_state,
 //                     CPUState*, env, uint64_t, fifo_addr,
 //                     uint32_t, port_addr, uint8_t, value);
 
-MAKE_CALLBACK_NO_ARGS(void, MAIN_LOOP_WAIT, main_loop_wait);
+// Main-thread walks (main_loop_wait, after_loadvm, pre_shutdown) count their depth: a plugin unload
+// requested inside one (pandare2 runs its queued work, panda_unload_plugins included, from its
+// main_loop_wait callback) is deferred to a bottom half, so it neither dlcloses code the walk returns
+// into nor drops the BQL (pausing the vCPUs) while the walk stands on an entry (callbacks.c). It
+// runs when the outermost walk ends (panda_unload_pending), else from a bottom half.
 
-MAKE_CALLBACK_NO_ARGS(void, PRE_SHUTDOWN, pre_shutdown);
+void PCB(main_loop_wait)(void) {
+    panda_cb_list *plist;
+    panda_main_walk_depth++;
+    for (plist = panda_cbs[PANDA_CB_MAIN_LOOP_WAIT]; plist != NULL; plist = panda_cb_list_next(plist)) {
+        if (plist->enabled)
+            plist->entry.main_loop_wait(plist->context);
+    }
+    if (--panda_main_walk_depth == 0) {
+        panda_unload_pending();
+    }
+}
+void panda_cb_trampoline_main_loop_wait(void* context) {
+    (*(panda_cb*)context).main_loop_wait();
+}
+
+void PCB(pre_shutdown)(void) {
+    panda_cb_list *plist;
+    panda_main_walk_depth++;
+    for (plist = panda_cbs[PANDA_CB_PRE_SHUTDOWN]; plist != NULL; plist = panda_cb_list_next(plist)) {
+        if (plist->enabled)
+            plist->entry.pre_shutdown(plist->context);
+    }
+    if (--panda_main_walk_depth == 0) {
+        panda_unload_pending();
+    }
+}
+void panda_cb_trampoline_pre_shutdown(void* context) {
+    (*(panda_cb*)context).pre_shutdown();
+}
 
 
 // Non-standard callbacks below here
@@ -336,17 +375,9 @@ extern bool panda_plugin_to_unload;
 extern int nb_panda_plugins;
 extern panda_plugin panda_plugins[MAX_PANDA_PLUGINS];
 
+// Plugin unloads requested from a callback no longer happen here, on the vCPU: they need every
+// vCPU out of the plugin's code (callbacks.c, panda_unload_later).
 void PCB(before_find_fast)(void) {
-    if (panda_plugin_to_unload) {
-        panda_plugin_to_unload = false;
-        for (int i = 0; i < nb_panda_plugins;) {
-            if (panda_plugins[i].unload) {
-                panda_do_unload_plugin(i);
-            } else {
-                i++;
-            }
-        }
-    }
     if (panda_flush_tb()) {
         queue_tb_flush(current_cpu);
         cpu_loop_exit(current_cpu);
