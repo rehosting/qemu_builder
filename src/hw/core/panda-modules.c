@@ -23,27 +23,32 @@ static GHashTable *module_types;
 /* realpath -> GPtrArray of its type names */
 static GHashTable *modules;
 
-static void collect_type(ObjectClass *oc, void *opaque)
-{
-    g_hash_table_add(opaque, (gpointer)object_class_get_name(oc));
-}
+/* What a module's type_init()s registered, from the QOM type registration hook. */
+typedef struct ModuleTypes {
+    GPtrArray *types;           /* new type names (QOM's strings) */
+    GPtrArray *clashes;         /* names that already existed (copies) */
+} ModuleTypes;
 
-static GHashTable *all_types(void)
+static void module_type_registered(const char *name, bool duplicate,
+                                   void *opaque)
 {
-    GHashTable *set = g_hash_table_new(g_str_hash, g_str_equal);
+    ModuleTypes *mt = opaque;
 
-    object_class_foreach(collect_type, NULL, true, set);
-    return set;
+    if (duplicate) {
+        g_ptr_array_add(mt->clashes, g_strdup(name));
+    } else {
+        g_ptr_array_add(mt->types, (gpointer)name);
+    }
 }
 
 GPtrArray *panda_module_load(const char *path, Error **errp)
 {
+    ERRP_GUARD();
     g_autofree char *real = realpath(path, NULL);
-    g_autoptr(GHashTable) before = NULL;
-    g_autoptr(GHashTable) after = NULL;
+    g_autoptr(GPtrArray) clashes = g_ptr_array_new_with_free_func(g_free);
+    ModuleTypes mt;
     GPtrArray *types;
-    GHashTableIter it;
-    gpointer name;
+    bool ok;
 
     if (phase_check(PHASE_MACHINE_CREATED)) {
         error_setg(errp, "%s: modules load only before the machine is "
@@ -63,21 +68,47 @@ GPtrArray *panda_module_load(const char *path, Error **errp)
         return g_ptr_array_ref(types);
     }
 
-    before = all_types();
-    if (!module_load_path(real, errp)) {
+    /*
+     * The hook records the types the module's inits register, and turns a
+     * name that already exists (built in, or from another module) into a
+     * record here instead of QOM's abort.
+     */
+    types = g_ptr_array_new();
+    mt.types = types;
+    mt.clashes = clashes;
+    type_register_set_hook(module_type_registered, &mt);
+    ok = module_load_path(real, target_name(), errp);
+    type_register_set_hook(NULL, NULL);
+    if (!ok) {
+        g_ptr_array_unref(types);
         return NULL;
     }
-    after = all_types();
-
-    types = g_ptr_array_new();
-    g_hash_table_iter_init(&it, after);
-    while (g_hash_table_iter_next(&it, &name, NULL)) {
-        if (!g_hash_table_contains(before, name)) {
-            g_ptr_array_add(types, name);
-            g_hash_table_insert(module_types, name, g_strdup(path));
-        }
+    for (guint i = 0; i < types->len; i++) {
+        g_hash_table_insert(module_types, types->pdata[i], g_strdup(path));
     }
     g_hash_table_insert(modules, g_steal_pointer(&real), types);
+    if (clashes->len) {
+        /*
+         * Its other types are registered and its code stays mapped (QOM
+         * points into it), so this is fatal to the run; but an error that
+         * names the clash, not an abort.
+         */
+        const char *name = clashes->pdata[0];
+        const char *origin = panda_module_type_origin(name);
+
+        if (origin && g_str_equal(origin, path)) {
+            origin = "the module itself";
+        }
+        error_setg(errp, "%s registers QOM type '%s', already registered by "
+                   "%s", path, name, origin ? origin : "the engine (built in)");
+        if (clashes->len > 1) {
+            error_append_hint(errp, "%u more type name(s) clash.\n",
+                              clashes->len - 1);
+        }
+        error_append_hint(errp, "Rename the module's type (a prefix of its "
+                          "own, e.g. '<vendor>.<board>-<device>').\n");
+        return NULL;
+    }
     return g_ptr_array_ref(types);
 }
 
@@ -134,45 +165,61 @@ char *panda_module_machine_spec(const char *spec, Error **errp)
     return g_strdup(name);
 }
 
-typedef struct VmstateCheck {
-    GHashTable *warned;     /* types already warned about */
-    const char *what;
-} VmstateCheck;
+/* Types already warned about (one warning per type and run). */
+static GHashTable *vmstate_warned;
+
+static void warn_no_vmstate(DeviceState *dev, const char *origin,
+                            const char *what)
+{
+    const char *type = object_get_typename(OBJECT(dev));
+
+    if (DEVICE_GET_CLASS(dev)->vmsd) {
+        return;
+    }
+    if (!vmstate_warned) {
+        vmstate_warned = g_hash_table_new(g_str_hash, g_str_equal);
+    }
+    if (g_hash_table_add(vmstate_warned, (gpointer)type)) {
+        g_autofree char *path = object_get_canonical_path(OBJECT(dev));
+
+        warn_report("device %s (%s, %s) has no vmstate: %s will not save "
+                    "or restore it", path ? path : "(unattached)", type,
+                    origin, what);
+    }
+}
 
 static int check_device_vmstate(Object *obj, void *opaque)
 {
-    VmstateCheck *c = opaque;
     DeviceState *dev = (DeviceState *)object_dynamic_cast(obj, TYPE_DEVICE);
-    const char *type, *origin;
+    g_autofree char *from = NULL;
+    const char *origin;
 
     if (!dev || !dev->realized) {
         return 0;
     }
-    type = object_get_typename(obj);
-    origin = panda_module_type_origin(type);
-    if (origin && !DEVICE_GET_CLASS(dev)->vmsd &&
-        g_hash_table_add(c->warned, (gpointer)type)) {
-        g_autofree char *path = object_get_canonical_path(obj);
-
-        warn_report("device %s (%s, from %s) has no vmstate: %s will not "
-                    "save or restore it", path, type, origin, c->what);
+    origin = panda_module_type_origin(object_get_typename(obj));
+    if (origin) {
+        from = g_strdup_printf("from %s", origin);
+        warn_no_vmstate(dev, from, opaque);
     }
     return 0;
 }
 
 void panda_modules_check_vmstate(const char *what)
 {
-    static GHashTable *warned;
-    VmstateCheck c;
-
     if (!module_types || !g_hash_table_size(module_types)) {
         return;
     }
-    if (!warned) {
-        warned = g_hash_table_new(g_str_hash, g_str_equal);
-    }
-    c.warned = warned;
-    c.what = what;
     object_child_foreach_recursive(object_get_root(), check_device_vmstate,
-                                   &c);
+                                   (void *)what);
+}
+
+void panda_device_check_vmstate(DeviceState *dev, const char *what)
+{
+    const char *origin = panda_module_type_origin(object_get_typename(
+                                                      OBJECT(dev)));
+    g_autofree char *from = origin ? g_strdup_printf("from %s", origin)
+                                   : NULL;
+
+    warn_no_vmstate(dev, from ? from : "built in", what);
 }

@@ -3,13 +3,15 @@
 """panda-abi.py SRC BUILD: print panda-abi.h, the panda ABI hash.
 
 The hash fingerprints what a panda module (an external board or device .so)
-compiles against: every header under include/, target/ and hw/, the QAPI
-schema (qapi/*.json, from which qapi-types-*.h are generated), the
-trace-events files, configs/targets/*.mak, and the build's config-host.h
-without its absolute paths (so the same source and configure give the same
-hash on any host and prefix). Paths are hashed with contents, in sorted
-order. The SDK ships exactly these inputs' headers, and module_load_path()
-refuses a module whose hash differs.
+compiles against: every header under include/, target/, hw/, host/include/,
+tcg/ and linux-headers/ (all of which the SDK ships), the QAPI schema
+(qapi/*.json, from which qapi-types-*.h are generated), the trace-events
+files, configs/targets/*.mak and configs/devices/**/*.mak with the Kconfig
+files (from which <target>-config-devices.h is made), and the build's
+config-host.h without its absolute paths (so the same source and configure
+give the same hash on any host and prefix). Paths are hashed with contents,
+in sorted order. module_load_path() refuses a module whose hash differs; the
+target a module is built for is checked separately (PandaModuleInfo.target).
 """
 import hashlib
 import os
@@ -19,24 +21,36 @@ SKIP_DIRS = {'tests', 'roms', 'subprojects', 'build', '.git', 'pyvenv',
              'docs', 'linux-user', 'bsd-user'}
 
 
+TOPS = ('include', 'target', 'hw', 'qapi', 'configs/targets', 'configs/devices',
+        'host/include', 'tcg', 'linux-headers')
+
+
+def wanted(top, f):
+    if f.endswith('.h') or f == 'trace-events' or f.startswith('Kconfig'):
+        return True
+    if top == 'qapi':
+        return f.endswith('.json')
+    if top.startswith('configs/'):
+        return f.endswith('.mak')
+    return False
+
+
 def inputs(src):
-    for top in ('include', 'target', 'hw', 'qapi', 'configs/targets', '.'):
+    for top in TOPS + ('.',):
         root = os.path.join(src, top)
         for dirpath, dirnames, filenames in os.walk(root):
             rel = os.path.relpath(dirpath, src)
             if top == '.':
-                # Only trace-events outside the directories walked above.
+                # trace-events and Kconfig files outside the directories above
                 dirnames[:] = [d for d in dirnames
                                if d not in SKIP_DIRS and not d.startswith('build')
-                               and os.path.join(rel, d).lstrip('./') not in
-                               ('include', 'target', 'hw', 'qapi', 'configs')]
-                names = [f for f in filenames if f == 'trace-events']
+                               and not any((os.path.join(rel, d) + '/').lstrip('./')
+                                           .startswith(t + '/') for t in TOPS)]
+                names = [f for f in filenames
+                         if f == 'trace-events' or f.startswith('Kconfig')]
             else:
                 dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-                names = [f for f in filenames
-                         if f.endswith('.h') or f == 'trace-events'
-                         or (top == 'qapi' and f.endswith('.json'))
-                         or (top == 'configs/targets' and f.endswith('.mak'))]
+                names = [f for f in filenames if wanted(top, f)]
             for f in names:
                 yield os.path.normpath(os.path.join(rel, f))
 
