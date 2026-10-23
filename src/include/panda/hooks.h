@@ -31,6 +31,8 @@ bool panda_tb_chaining_enabled(void);
 void panda_callbacks_before_find_fast(void);
 /* Each main-loop iteration (pandare2 runs its queued snapshot/revert work here) */
 void panda_callbacks_main_loop_wait(void);
+/* After load_snapshot() restored a snapshot (loadvm, panda_revert, an rr start) */
+void panda_callbacks_after_loadvm(CPUState *env);
 
 #else
 
@@ -50,6 +52,7 @@ static inline bool panda_tb_chaining_enabled(void)
 }
 static inline void panda_callbacks_before_find_fast(void) {}
 static inline void panda_callbacks_main_loop_wait(void) {}
+static inline void panda_callbacks_after_loadvm(CPUState *env) {}
 static inline bool panda_callbacks_asid_changed(CPUState *cpu, uint64_t oldval, uint64_t newval)
 {
     return false;
