@@ -1,4 +1,7 @@
 #include "panda/common.h"
+#include "system/physmem.h"
+#include "system/ramblock.h"
+#include "exec/translation-block.h"
 
 /* (not kernel-doc)
  * panda_physical_memory_rw() - Copy data between host and guest.
@@ -19,6 +22,25 @@
  * * MEMTX_OK      - Read/write succeeded
  * * MEMTX_ERROR   - An error 
  */
+/*
+ * After a direct write into a RAM region: what address_space_write's invalidate_and_set_dirty
+ * does. Invalidate TBs translated from the bytes (stale code ran after a write before), and log
+ * the pages dirty (a fast restore copies back only logged pages).
+ */
+static void panda_physical_memory_written(MemoryRegion *mr, hwaddr addr1, hwaddr len) {
+    uint8_t mask = memory_region_get_dirty_log_mask(mr);
+    ram_addr_t ra = memory_region_get_ram_addr(mr) + addr1;
+
+    if (mask) {
+        mask = physical_memory_range_includes_clean(ra, len, mask);
+    }
+    if (mask & (1 << DIRTY_MEMORY_CODE)) {
+        tb_invalidate_phys_range(NULL, ra, ra + len - 1);
+        mask &= ~(1 << DIRTY_MEMORY_CODE);
+    }
+    physical_memory_set_dirty_range(ra, len, mask);
+}
+
 int panda_physical_memory_rw(hwaddr addr, uint8_t *buf, int len,
                                            bool is_write) {
     // return address_space_rw(&address_space_memory, addr, MEMTXATTRS_UNSPECIFIED,
@@ -37,6 +59,7 @@ int panda_physical_memory_rw(hwaddr addr, uint8_t *buf, int len,
 
     if (is_write) {
         memcpy(ram_ptr, buf, len);
+        panda_physical_memory_written(mr, addr1, len);
     } else {
         memcpy(buf, ram_ptr, len);
     }
