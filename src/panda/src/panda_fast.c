@@ -431,8 +431,17 @@ int64_t panda_fast_verify(void) {
         for (size_t off = 0; off < b->len; off += ps) {
             if (memcmp(host + off, b->copy + off, MIN(ps, b->len - off))) {
                 if (differ < 8) {
-                    fprintf(stderr, "panda_fast_verify: %s+0x%zx differs\n",
-                            qemu_ram_get_idstr(b->rb), off);
+                    size_t j = 0;
+                    while (host[off + j] == b->copy[off + j]) {
+                        j++;
+                    }
+                    fprintf(stderr, "panda_fast_verify: %s+0x%zx differs at +0x%zx "
+                            "(snapshot %02x, RAM %02x; migration bit %d, code bit %d)\n",
+                            qemu_ram_get_idstr(b->rb), off, j, b->copy[off + j], host[off + j],
+                            physical_memory_get_dirty_flag(b->offset + off,
+                                                           DIRTY_MEMORY_MIGRATION),
+                            physical_memory_get_dirty_flag(b->offset + off,
+                                                           DIRTY_MEMORY_CODE));
                 }
                 differ++;
             }
