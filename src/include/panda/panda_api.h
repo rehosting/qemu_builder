@@ -67,9 +67,11 @@ void panda_main_loop_kick(void);
 
 
 /**
- * panda_fast_snap() - Snapshot RAM and device state in host memory (prototype).
+ * panda_fast_snap() - Snapshot RAM and device state in host memory.
  *
- * Main loop. No disk state. Return: 0 on success.
+ * Main loop; stops the VM if it runs. No disk state. The first snapshot copies all RAM and arms
+ * dirty-page tracking; a later one copies only the pages written since the last snapshot or
+ * restore. Return: 0 on success.
  */
 int panda_fast_snap(void);
 
@@ -77,9 +79,41 @@ int panda_fast_snap(void);
 /**
  * panda_fast_restore() - Restore the panda_fast_snap() state; the VM stays stopped.
  *
- * Main loop. The disk is not restored. Return: 0 on success.
+ * Main loop. Copies back only the pages written since the last snapshot or restore (by vCPUs,
+ * DMA, devices, or PANDA's physical/virtual memory writes); the whole RAM when the dirty bitmap
+ * can't be trusted (a savevm or migration read it, a loadvm wrote RAM). Writes through host
+ * pointers from panda_map_virt_to_host are not seen. The disk is not restored.
+ * Return: 0 on success.
  */
 int panda_fast_restore(void);
+
+
+/**
+ * panda_fast_delete() - Free the fast snapshot and stop dirty-page tracking.
+ */
+void panda_fast_delete(void);
+
+
+/**
+ * panda_fast_verify() - Compare all RAM with the fast snapshot (a test aid; reads all RAM).
+ *
+ * Main loop, VM stopped. Right after panda_fast_restore() it must be 0.
+ * Return: the number of target pages that differ, -1 without a snapshot.
+ */
+int64_t panda_fast_verify(void);
+
+
+/**
+ * panda_fast_info() - Counters and RAM blocks of the fast snapshot, as "key=value ..." text.
+ *
+ * snaps, restores, full_restores, last_pages (pages the last restore copied), last_full,
+ * tracking, blocks (id:bytes:dirty|compare).
+ */
+const char *panda_fast_info(void);
+
+
+/* Not an API function: RAM changed without dirty bits (loadvm); the next restore copies it all. */
+void panda_fast_ram_untracked(void);
 
 
 // Not an API function.

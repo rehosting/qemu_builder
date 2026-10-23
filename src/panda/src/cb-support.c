@@ -14,6 +14,7 @@
 #include "panda/panda_qemu_plugin_helpers.h"
 #include "panda/callbacks/cb-trampolines.h"
 #include "exec/tb-flush.h"
+#include "panda/panda_api.h"
 
 #define PCB(name) panda_callbacks_ ## name
 
@@ -79,7 +80,18 @@ MAKE_CALLBACK(void, AFTER_CPU_EXEC_ENTER, after_cpu_exec_enter,
 MAKE_CALLBACK(void, BEFORE_CPU_EXEC_EXIT, before_cpu_exec_exit,
                     CPUState*, cpu, bool, ranBlock);
 
-MAKE_CALLBACK(void, AFTER_LOADVM, after_loadvm, CPUState*, env);
+// Not macroized: a loadvm rewrote RAM without dirty bits, so a fast restore can't trust them.
+void PCB(after_loadvm)(CPUState *env) {
+    panda_cb_list *plist;
+    panda_fast_ram_untracked();
+    for (plist = panda_cbs[PANDA_CB_AFTER_LOADVM]; plist != NULL; plist = panda_cb_list_next(plist)) {
+        if (plist->enabled)
+            plist->entry.after_loadvm(plist->context, env);
+    }
+}
+void panda_cb_trampoline_after_loadvm(void* context, CPUState *env) {
+    (*(panda_cb*)context).after_loadvm(env);
+}
 
 // These are used in target-i386/translate.c
 MAKE_CALLBACK(bool, INSN_TRANSLATE, insn_translate,
