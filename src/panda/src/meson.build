@@ -1,4 +1,5 @@
-specific_ss.add(
+panda_runtime_ss = ss.source_set()
+panda_runtime_ss.add(
     files(
         'common.c',
         'callbacks.c',
@@ -9,6 +10,7 @@ specific_ss.add(
         'panda_mem.c',
         'panda_qemu_plugin_helpers.c',
         'rr_control.c',
+        'runtime.c',
         'wrap_ops.c',
     )
 )

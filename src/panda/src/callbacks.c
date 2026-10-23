@@ -31,6 +31,7 @@ PANDAENDCOMMENT */
 #include "panda/common.h"
 #include "panda/callbacks/cb-trampolines.h"
 #include "panda/callbacks/cb-support.h"
+#include "panda/hooks.h"
 
 #define SOFTMMU_DIR "/" TARGET_NAME "-softmmu"
 #define LIBRARY_NAME "/libpanda-" TARGET_NAME ".so"
@@ -932,11 +933,13 @@ void panda_disable_memcb(void)
 void panda_enable_tb_chaining(void)
 {
     panda_tb_chaining = true;
+    qatomic_set(&panda_hooks_nochain, false);   /* the engine's curr_cflags reads it (0046) */
 }
 
 void panda_disable_tb_chaining(void)
 {
     panda_tb_chaining = false;
+    qatomic_set(&panda_hooks_nochain, true);
 }
 
 bool panda_tb_chaining_enabled(void)

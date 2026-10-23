@@ -25,7 +25,14 @@
 #include "panda/wrap_ops.h"
 
 // call main_aux and run everything up to and including panda_callbacks_after_machine_init
+extern bool panda_runtime_attached;   /* runtime.c */
+
 int panda_init(int argc, char **argv, char **envp) {
+    if (!panda_runtime_attached) {
+        /* runtime.c's constructor said why (another runtime loaded, another engine ABI) */
+        error_report("PANDA runtime not attached to the engine: not starting");
+        exit(1);
+    }
     qemu_init(argc, argv);
     wrap_cpu_ops();
     panda_callbacks_after_machine_init(first_cpu);
