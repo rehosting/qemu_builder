@@ -107,7 +107,18 @@ MAKE_CALLBACK(void, AFTER_CPU_EXEC_ENTER, after_cpu_exec_enter,
 MAKE_CALLBACK(void, BEFORE_CPU_EXEC_EXIT, before_cpu_exec_exit,
                     CPUState*, cpu, bool, ranBlock);
 
-MAKE_CALLBACK(void, AFTER_LOADVM, after_loadvm, CPUState*, env);
+// Not macroized: the process identifier's state (x86 KPTI) is decided again first.
+void PCB(after_loadvm)(CPUState *env) {
+    panda_cb_list *plist;
+    panda_asid_after_loadvm(env ? env : first_cpu);
+    for (plist = panda_cbs[PANDA_CB_AFTER_LOADVM]; plist != NULL; plist = panda_cb_list_next(plist)) {
+        if (plist->enabled)
+            plist->entry.after_loadvm(plist->context, env);
+    }
+}
+void panda_cb_trampoline_after_loadvm(void* context, CPUState *env) {
+    (*(panda_cb*)context).after_loadvm(env);
+}
 
 // These are used in target-i386/translate.c
 MAKE_CALLBACK(bool, INSN_TRANSLATE, insn_translate,
