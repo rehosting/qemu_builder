@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "system/system.h"
 #include "system/runstate.h"
+#include "system/cpus.h"
 #include "panda/callbacks/cb-support.h"
 #include "panda/wrap_ops.h"
 
@@ -49,7 +50,13 @@ int panda_run(void) {
 
 void panda_stop(int code) {
     // default of 4 = run_state_paused
-    vm_stop(code);
+    if (qemu_in_vcpu_thread() || bql_locked()) {
+        vm_stop(code);
+    } else {
+        /* any other thread (a pandare2 blocking function): ask the main loop */
+        qemu_system_vmstop_request_prepare();
+        qemu_system_vmstop_request(code);
+    }
 }
 
 void panda_cont(void) {
