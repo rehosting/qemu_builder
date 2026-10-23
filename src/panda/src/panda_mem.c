@@ -7,6 +7,7 @@
 #include "accel/tcg/cpu-loop.h"
 #include "qemu/plugin.h"
 #include "system/tcg.h"
+#include "system/replay.h"
 
 /* (not kernel-doc)
  * panda_physical_memory_rw() - Copy data between host and guest.
@@ -334,9 +335,17 @@ void panda_vmem_fault_open(CPUState *cpu, uint64_t pc)
 
 static bool vmem_fault_window_ok(CPUState *cpu)
 {
-    return vmem_fault_on && tcg_enabled() && cpu && cpu == current_cpu &&
+    /* Never under record/replay: the guest fault is not in the log, so a replay diverges (and a
+     * recording made with it could only replay with the same plugin, which replay refuses too). */
+    return vmem_fault_on && tcg_enabled() && replay_mode == REPLAY_MODE_NONE &&
+           cpu && cpu == current_cpu &&
            vmf.open && vmf.cpu == cpu && vmf.ra && vmf.ra == cpu->neg.plugin_cb_ra &&
            qemu_plugin_get_cb_flags() == QEMU_PLUGIN_CB_RW_REGS_PC;
+}
+
+bool panda_vmem_fault_pending(CPUState *cpu)
+{
+    return vmf.open && vmf.pending && vmf.cpu == cpu;
 }
 
 void panda_vmem_fault_close(CPUState *cpu)

@@ -93,9 +93,10 @@ void *panda_map_virt_to_host(CPUState * env, target_ulong addr, int len);
  * 1. panda_enable_vmem_fault() once, before the code you want to access memory from is translated
  *    (it flushes the translation cache). Until it is called nothing changes for anyone; after it,
  *    insn_exec and block-start callbacks are entered through a trampoline (a few instructions each).
- * 2. From an insn_exec callback (and everything dispatched from one, e.g. syscalls2's on_*_enter
- *    callbacks), or from before_block_exec or start_block_exec, call
- *    panda_virtual_memory_read_fault() / _write_fault() / _rw_fault().
+ * 2. From a PANDA insn_exec, before_block_exec or start_block_exec callback (served by the bridge),
+ *    call panda_virtual_memory_read_fault() / _write_fault() / _rw_fault(). NOT from syscalls2's
+ *    on_*_enter/return or the hooks plugin's callbacks: those plugins register their own QEMU
+ *    callbacks (NO_REGS, no trampoline), so the call returns PANDA_VMEM_ECONTEXT there.
  * 3. PANDA_VMEM_OK: done. PANDA_VMEM_FAULT_PENDING: a page needs the guest; nothing was read or
  *    written. Return from your callback without acting on the access. Once every callback for
  *    this event has returned, the guest takes the fault the program's own access would take
@@ -103,6 +104,12 @@ void *panda_map_virt_to_host(CPUState * env, target_ulong addr, int len);
  *    so your callback (and every other one for the event) runs again; call it again then.
  *    A range over several pages may need several rounds. Callbacks must therefore tolerate
  *    running more than once for one guest instruction.
+ *    This holds for EVERY plugin, not only the one that asked: while the opt-in is used, all
+ *    insn_exec callbacks for that instruction (or before_block_exec/start_block_exec for that
+ *    block) run again on the re-run, so counters, coverage and loggers see the event twice.
+ *    A block start the fault aborts gets no end_block_exec/after_block_exec (it ran nothing);
+ *    an instruction's fault ends its block early as any guest fault does (after_block_exec with
+ *    TB_EXIT_REQUESTED).
  *
  * The access is made as the guest program would make it: user-mode permissions, in the current
  * address space. A write to a copy-on-write or clean page is a store fault the kernel resolves (the
@@ -113,8 +120,9 @@ void *panda_map_virt_to_host(CPUState * env, target_ulong addr, int len);
  * user fault there; that is the caller's responsibility). If the same page faults again at the same
  * instruction without being mapped, the call returns PANDA_VMEM_ERROR instead of faulting again.
  *
- * Called from anywhere else (another callback type, the main loop, another thread, another vCPU,
- * before panda_enable_vmem_fault(), under KVM) it returns PANDA_VMEM_ECONTEXT and touches nothing:
+ * Called from anywhere else (another callback type, syscalls2/hooks callbacks, the main loop,
+ * another thread, another vCPU, before panda_enable_vmem_fault(), under KVM, or while recording or
+ * replaying: the fault would not be in the log) it returns PANDA_VMEM_ECONTEXT and touches nothing:
  * there is no instruction there to re-run. Memory callbacks (virt/phys_mem_*) are not supported.
  * It does not drop the BQL and is independent of patch 0028.
  */

@@ -167,8 +167,9 @@ typedef union panda_cb {
         accessors (panda_virtual_memory_read_fault() and friends, see
         panda/common.h). When one returns PANDA_VMEM_FAULT_PENDING, the
         guest takes a page fault at the block's first instruction once the
-        block-start callbacks return, the block ends with TB_EXIT_REQUESTED,
-        and the block starts again: before_block_exec runs again for it.
+        block-start callbacks return; the aborted start gets no
+        end_block_exec/after_block_exec, and the block starts again: every
+        plugin's before_block_exec runs again for it.
     */
     void (*before_block_exec)(CPUState *env, TranslationBlock *tb);
 
@@ -330,12 +331,13 @@ typedef union panda_cb {
         This is fairly expensive, which is why it's only enabled via
         the PANDA_CB_INSN_TRANSLATE callback.
 
-        After panda_enable_vmem_fault() it (and everything it dispatches,
-        e.g. syscalls2's on_*_enter callbacks) may call the opt-in page-in
+        After panda_enable_vmem_fault() it may call the opt-in page-in
         accessors (panda_virtual_memory_read_fault() and friends, see
-        panda/common.h). When one returns PANDA_VMEM_FAULT_PENDING, the
-        guest takes the page fault at this instruction once every insn_exec
-        callback has returned, and runs it again: insn_exec runs again.
+        panda/common.h; not from syscalls2/hooks callbacks, which run from
+        their own QEMU callbacks). When one returns PANDA_VMEM_FAULT_PENDING,
+        the guest takes the page fault at this instruction once every
+        insn_exec callback has returned, and runs it again: every plugin's
+        insn_exec runs again for it.
     */
     int (*insn_exec)(CPUState *env, uint64_t pc);
 

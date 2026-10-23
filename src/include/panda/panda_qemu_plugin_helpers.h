@@ -48,4 +48,5 @@ uint64_t panda_block_gate(void);
 bool panda_bridge_vmem_fault(void);   /* panda_vmem_fault_enabled(), for the bridge */
 void panda_vmem_fault_open(CPUState *cpu, uint64_t pc);
 void panda_vmem_fault_close(CPUState *cpu);
+bool panda_vmem_fault_pending(CPUState *cpu);    /* a callback asked for a fault in the open window */
 void panda_block_start_fault(CPUState *cpu, TranslationBlock *tb);

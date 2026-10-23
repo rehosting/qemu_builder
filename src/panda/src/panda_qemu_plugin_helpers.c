@@ -182,8 +182,15 @@ void panda_block_start(CPUState *cpu, TranslationBlock *tb){
 
 void panda_block_start_fault(CPUState *cpu, TranslationBlock *tb){
     panda_end_block_flush(cpu);     /* panda_block_start's own flush is then a no-op */
-    panda_vmem_fault_open(cpu, tb->pc);
+    /* The window's pc keys the loop bound: the CPU's pc at the block's entry, not tb->pc, which is 0
+     * for an unbound CF_PCREL TB once block callbacks stop binding (tbpc; panda_tb_pc there). */
+    panda_vmem_fault_open(cpu, panda_current_pc(cpu));
     panda_block_start(cpu, tb);
+    if (panda_vmem_fault_pending(cpu) && cpu->cpu_index < PANDA_END_SLOTS) {
+        /* The fault aborts the block before its first instruction: it never ran, so it gets no
+         * end_block_exec/after_block_exec; it starts again (before_block_exec) after the fault. */
+        pending[cpu->cpu_index].tb = NULL;
+    }
     panda_vmem_fault_close(cpu);    /* may raise the guest fault a callback asked for */
 }
 
