@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Thu, 22 Oct 2026 22:46:30 -0400
+Subject: [PATCH] panda: main_loop_wait callback after each main-loop iteration
+
+pandare2 runs its queued main-loop work (snap, revert_async, cont) from
+this callback; it had no call site. Outside main_loop_wait itself, so
+the work (savevm/loadvm) is not nested in an aio dispatch.
+---
+ system/runstate.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/system/runstate.c b/system/runstate.c
+index 569841239f1dee0918a65cd85fc2da6f425d6eef..c3d3360f4f0e317496f5d286f329bdb18e5de463 100644
+--- a/system/runstate.c
++++ b/system/runstate.c
+@@ -57,6 +57,7 @@
+ #include "system/replay.h"
+ #include "system/reset.h"
+ #include "system/runstate.h"
++#include "panda/hooks.h"
+ #include "system/runstate-action.h"
+ #include "system/confidential-guest-support.h"
+ #include "system/system.h"
+@@ -951,6 +952,7 @@ int qemu_main_loop(void)
+ 
+     while (!main_loop_should_exit(&status)) {
+         main_loop_wait(false);
++        panda_callbacks_main_loop_wait();
+     }
+ 
+     return status;
