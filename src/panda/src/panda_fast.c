@@ -73,6 +73,7 @@
 #endif
 #include "panda/plugin.h"
 #include "panda/panda_api.h"
+#include "panda/hooks.h"
 
 typedef struct FastBlock {
     RAMBlock *rb;
@@ -449,7 +450,6 @@ int panda_fast_snap(void) {
 }
 
 int panda_fast_restore(void) {
-    CPUState *cs;
     bool full, unlogged;
     int64_t t0, t1, t2;
     uint64_t pages = 0;
@@ -531,6 +531,7 @@ int panda_fast_restore(void) {
     fast_stats.last_ram_us = t2 - t1;
     fast_stats.last_dev_us = g_get_monotonic_time() - t2;
 #ifdef TARGET_ARM
+    CPUState *cs;
     /*
      * Recompute the generic timers once every device (the GIC) is loaded, as the KVM->TCG
      * handoff in target/arm/machine.c does. Not what fixed the aarch64 hang (that was the DTB
