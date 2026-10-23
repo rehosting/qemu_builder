@@ -50,4 +50,4 @@
 11.1.0/0050-replay-x-rr-begin-record-filter-ids-valid-for-nic-ne.patch
 11.1.0/0051-replay-no-frontend-room-while-a-recorded-chardev-rea.patch
 11.1.0/0052-replay-x-rr-begin-record-rewinds-the-log-to-the-star.patch
-11.1.0/0053-panda-main_loop_wait-callback-after-each-main-loop-i.patch
+11.1.0/0053-panda-main_loop_wait-callback-at-each-main-loop-iter.patch
