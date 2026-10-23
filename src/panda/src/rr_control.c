@@ -140,6 +140,25 @@ int panda_replay_begin(const char *name)
     return rr_request(RR_REQ_REPLAY, name, NULL);
 }
 
+static void shutdown_bh(void *opaque)
+{
+    qemu_system_shutdown_request((ShutdownCause)(uintptr_t)opaque);
+}
+
+/*
+ * qemu_system_shutdown_request() for any thread.  While recording, the request
+ * goes in the log, which needs the replay mutex: the main loop holds it.
+ */
+void panda_shutdown_request(int cause)
+{
+    if (rr_in_record()) {
+        aio_bh_schedule_oneshot(qemu_get_aio_context(), shutdown_bh,
+                                (void *)(uintptr_t)cause);
+    } else {
+        qemu_system_shutdown_request(cause);
+    }
+}
+
 /* A replay can't continue past a stop; ending it ends the run. */
 int panda_replay_end(void)
 {

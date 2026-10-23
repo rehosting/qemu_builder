@@ -389,6 +389,8 @@ int panda_replay_end(void);
 bool rr_in_record(void);
 bool rr_in_replay(void);
 bool rr_on(void);
+/* qemu_system_shutdown_request() that is safe from any thread, recording or not. */
+void panda_shutdown_request(int cause);
 
 // Not and API function.
 char* panda_get_rr_name(void);
