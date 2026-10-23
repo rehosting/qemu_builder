@@ -48,14 +48,29 @@
 
 MAKE_CALLBACK(void, BEFORE_TCG_CODEGEN, before_tcg_codegen, CPUState*, cpu, TranslationBlock*, tb);
 
-// These are used in cpu-exec.c
-MAKE_CALLBACK(void, BEFORE_BLOCK_EXEC, before_block_exec,
-                    CPUState*, cpu, TranslationBlock*, tb);
+// before/after_block_exec run from the block's own code (panda_block_start, from the TCG plugin
+// bridge), so they fire once per block with TB chaining on. cpu_tb_exec's hooks (patch 0043) only end
+// the vCPU's pending block when a TB returns to the CPU loop: what ran last ran to its end.
+void PCB(before_block_exec)(CPUState *cpu, TranslationBlock *tb) {
+}
 
-// Not macroized: the block that ran last ends first (panda_end_block_flush).
 void PCB(after_block_exec)(CPUState *cpu, TranslationBlock *tb, uint8_t exitCode) {
-    panda_cb_list *plist;
     panda_end_block_flush(cpu);
+}
+
+void PCB(before_block_exec_dispatch)(CPUState *cpu, TranslationBlock *tb) {
+    panda_cb_list *plist;
+    for (plist = panda_cbs[PANDA_CB_BEFORE_BLOCK_EXEC]; plist != NULL; plist = panda_cb_list_next(plist)) {
+        if (plist->enabled)
+            plist->entry.before_block_exec(plist->context, cpu, tb);
+    }
+}
+void panda_cb_trampoline_before_block_exec(void* context, CPUState *cpu, TranslationBlock *tb) {
+    (*(panda_cb*)context).before_block_exec(cpu, tb);
+}
+
+void PCB(after_block_exec_dispatch)(CPUState *cpu, TranslationBlock *tb, uint8_t exitCode) {
+    panda_cb_list *plist;
     for (plist = panda_cbs[PANDA_CB_AFTER_BLOCK_EXEC]; plist != NULL; plist = panda_cb_list_next(plist)) {
         if (plist->enabled)
             plist->entry.after_block_exec(plist->context, cpu, tb, exitCode);
@@ -63,6 +78,18 @@ void PCB(after_block_exec)(CPUState *cpu, TranslationBlock *tb, uint8_t exitCode
 }
 void panda_cb_trampoline_after_block_exec(void* context, CPUState *cpu, TranslationBlock *tb, uint8_t exitCode) {
     (*(panda_cb*)context).after_block_exec(cpu, tb, exitCode);
+}
+
+// true if any callback wants the block translated again before it runs
+bool PCB(before_block_exec_invalidate_opt)(CPUState *cpu, TranslationBlock *tb) {
+    panda_cb_list *plist;
+    bool invalidate = false;
+    for (plist = panda_cbs[PANDA_CB_BEFORE_BLOCK_EXEC_INVALIDATE_OPT]; plist != NULL;
+         plist = panda_cb_list_next(plist)) {
+        if (plist->enabled)
+            invalidate |= plist->entry.before_block_exec_invalidate_opt(plist->context, cpu, tb);
+    }
+    return invalidate;
 }
 
 MAKE_CALLBACK(void, BEFORE_BLOCK_TRANSLATE, before_block_translate,

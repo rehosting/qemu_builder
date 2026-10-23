@@ -110,7 +110,10 @@ typedef union panda_cb {
 
        before_block_exec_invalidate_opt:
         Called before execution of every basic block, with the option
-        to invalidate the TB.
+        to invalidate the TB. Runs at the block's start, from its own code
+        (TB chaining stays on), before before_block_exec. Returning true
+        drops the TB and leaves it; the block is translated again and its
+        next start is not asked again.
 
        Arguments:
         CPUState *env:        the current CPU state
@@ -145,7 +148,10 @@ typedef union panda_cb {
     /* Callback ID: PANDA_CB_BEFORE_BLOCK_EXEC
 
        before_block_exec:
-        Called before execution of every basic block.
+        Called before execution of every basic block: once per block that
+        starts, from the block's own code at its first instruction, so TB
+        chaining need not be off. A block that exits at its entry (an
+        interrupt pending) never starts and gets no call.
 
        Arguments:
         CPUState *env:        the current CPU state
@@ -161,8 +167,16 @@ typedef union panda_cb {
     /* Callback ID: PANDA_CB_AFTER_BLOCK_EXEC
 
        after_block_exec:
-        Called after execution of every basic block.
-        If exitCode > TB_EXIT_IDX1, then the block exited early.
+        Called after execution of every basic block: exactly once for each
+        before_block_exec, once the block has stopped, before anything else
+        happens on that vCPU (the next block's start, the return to the CPU
+        loop, an exception's delivery). exitCode is TB_EXIT_IDX0 when the
+        block ran to its end and TB_EXIT_REQUESTED (> TB_EXIT_IDX1: exited
+        early) when it left by longjmp: a fault part way through, an
+        exception its last instruction raised (svc, ecall), or a
+        start_block_exec that called panda_break_exec. Works with TB
+        chaining on. (In PANDA 1/2 it ran in cpu_tb_exec and needed chaining
+        off; exitCode was the goto_tb slot, and an exception skipped it.)
 
        Arguments:
         CPUState *env:        the current CPU state
