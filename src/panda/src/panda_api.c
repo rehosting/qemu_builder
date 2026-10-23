@@ -16,6 +16,9 @@
 #include "io/channel-buffer.h"
 #include "system/ramblock.h"
 #include "exec/tb-flush.h"
+#ifdef TARGET_ARM
+#include "target/arm/internals.h"
+#endif
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "system/memory.h"
@@ -150,6 +153,16 @@ int panda_fast_restore(void) {
         error_report_err(err);
         return -1;
     }
+#ifdef TARGET_ARM
+    /* UNTESTED candidate fix for the aarch64 hang: re-arm the generic timers (as the KVM->TCG
+     * handoff in target/arm/machine.c does) */
+    {
+        CPUState *cs;
+        CPU_FOREACH(cs) {
+            arm_gt_recalc_el1_timers(ARM_CPU(cs));
+        }
+    }
+#endif
     return 0;
 }
 
