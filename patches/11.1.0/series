@@ -57,3 +57,5 @@
 11.1.0/0057-target-arm-ptw-log-hardware-access-flag-and-dirty-state-updates.patch
 11.1.0/0058-panda-block-callbacks-learn-of-a-longjmp-out-of-the-blo.patch
 11.1.0/0080-accel-tcg-cpu_exec_step_atomic-runs-in-an-RCU-read-s.patch
+11.1.0/0081-target-arm-a-snapshot-loads-across-icount-on-off-PMC.patch
+11.1.0/0082-target-riscv-log-hardware-A-D-page-table-updates-as-.patch
