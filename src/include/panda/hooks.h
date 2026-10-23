@@ -23,9 +23,13 @@ int32_t panda_callbacks_before_handle_exception(CPUState *cpu, int32_t exception
 bool panda_callbacks_asid_changed(CPUState *cpu, uint64_t oldval, uint64_t newval);
 /* true: a plugin handled the hypercall and set the guest's registers itself */
 bool panda_callbacks_guest_hypercall(CPUState *cpu);
-/* false after panda_disable_tb_chaining(): every TB returns to cpu_exec, so the block_exec
- * callbacks there run once per TB rather than once per chain */
+/* false after panda_disable_tb_chaining(): every TB returns to cpu_exec. The block-exec callbacks
+ * don't need it (they run from the block's own code); kept for plugins that want it. */
 bool panda_tb_chaining_enabled(void);
+/* A longjmp left the block a vCPU was running (a fault, an exception its last instruction raised,
+ * cpu_loop_exit_noexc): its after_block_exec runs now, with TB_EXIT_REQUESTED, before the exception
+ * is delivered. Nothing pending (the usual case: no block-exec callback), nothing done. */
+void panda_callbacks_block_longjmp(CPUState *cpu);
 /* Before each TB lookup: unload plugins that asked to be, and flush the TBs if panda_do_flush_tb()
  * asked (it leaves the CPU loop, which then looks the TB up again) */
 void panda_callbacks_before_find_fast(void);
@@ -50,6 +54,7 @@ static inline bool panda_tb_chaining_enabled(void)
 {
     return true;
 }
+static inline void panda_callbacks_block_longjmp(CPUState *cpu) {}
 static inline void panda_callbacks_before_find_fast(void) {}
 static inline void panda_callbacks_main_loop_wait(void) {}
 static inline void panda_callbacks_after_loadvm(CPUState *env) {}

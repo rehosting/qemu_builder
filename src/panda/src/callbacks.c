@@ -30,6 +30,7 @@ PANDAENDCOMMENT */
 
 #include "panda/common.h"
 #include "panda/callbacks/cb-trampolines.h"
+#include "panda/callbacks/cb-support.h"
 
 #define SOFTMMU_DIR "/" TARGET_NAME "-softmmu"
 #define LIBRARY_NAME "/libpanda-" TARGET_NAME ".so"
@@ -589,6 +590,20 @@ panda_cb_with_context panda_get_cb_trampoline(panda_cb_type type) {
  * @note Registering a callback function twice from the same plugin will trigger
  * an assertion error.
  */
+/* A callback list changed. Block-exec callbacks run from instrumentation the bridge adds at
+ * translation, only while one is registered: the first one registered (and the last one gone)
+ * flushes the TBs so code translated before it gets (or loses) the block start; enabling and
+ * disabling only opens and closes the bridge's gate (no retranslation). */
+static void panda_cb_list_changed(panda_cb_type type, bool was_registered)
+{
+    if (panda_is_block_cb_type(type)) {
+        if (was_registered != (panda_cbs[type] != NULL)) {
+            panda_do_flush_tb();
+        }
+        panda_block_cbs_changed();
+    }
+}
+
 void panda_register_callback(void *plugin, panda_cb_type type, panda_cb cb)
 {
     panda_cb_with_context trampoline = panda_get_cb_trampoline(type);
@@ -611,6 +626,7 @@ void panda_register_callback(void *plugin, panda_cb_type type, panda_cb cb)
 void panda_register_callback_with_context(void *plugin, panda_cb_type type, panda_cb_with_context cb, void* context)
 {
     panda_cb_list *plist_last = NULL;
+    bool was_registered = panda_cbs[type] != NULL;
 
     panda_cb_list *new_list = g_new0(panda_cb_list, 1);
     new_list->entry = cb;
@@ -633,6 +649,7 @@ void panda_register_callback_with_context(void *plugin, panda_cb_type type, pand
     } else {
         panda_cbs[type] = new_list;
     }
+    panda_cb_list_changed(type, was_registered);
 }
 
 /**
@@ -697,6 +714,7 @@ void panda_disable_callback_with_context(void *plugin, panda_cb_type type, panda
             ) {
                 found = true;
                 plist->enabled = false;
+                panda_cb_list_changed(type, true);
 
                 // break out of the loop - the same plugin can register the same
                 // callback only once
@@ -750,6 +768,7 @@ void panda_enable_callback_with_context(void *plugin, panda_cb_type type, panda_
             ) {
                 found = true;
                 plist->enabled = true;
+                panda_cb_list_changed(type, true);
 
                 // break out of the loop - the same plugin can register the same
                 // callback only once
@@ -774,6 +793,7 @@ void panda_unregister_callbacks(void *plugin)
         panda_cb_list *plist;
         plist = panda_cbs[i];
         panda_cb_list *plist_head = plist;
+        bool was_registered = plist != NULL;
         while (plist != NULL) {
             panda_cb_list *plist_next = plist->next;
             if (plist->owner == plugin) {
@@ -799,6 +819,7 @@ void panda_unregister_callbacks(void *plugin)
         }
         // update head
         panda_cbs[i] = plist_head;
+        panda_cb_list_changed(i, was_registered);
     }
 }
 
@@ -821,6 +842,7 @@ void panda_enable_plugin(void *plugin)
             plist = plist->next;
         }
     }
+    panda_block_cbs_changed();
 }
 
 /**
@@ -842,6 +864,7 @@ void panda_disable_plugin(void *plugin)
             plist = plist->next;
         }
     }
+    panda_block_cbs_changed();
 }
 
 /**

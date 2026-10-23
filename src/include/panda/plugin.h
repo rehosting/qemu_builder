@@ -341,6 +341,11 @@ uintptr_t panda_get_current_llvm_module(void);
  * For some analyses this is problematic and so this function disables
  * the behavior, meaning that emulation of a basic block of guest code
  * always returns control to the main emulation loop after it is done.
+ *
+ * The block-exec callbacks (before/after_block_exec, start/end_block_exec,
+ * before_block_exec_invalidate_opt) don't need it: they run from each block's
+ * own code and fire once per block either way. Turning chaining off costs
+ * 1.5-4x in guest speed.
  */
 void panda_disable_tb_chaining(void);
 
