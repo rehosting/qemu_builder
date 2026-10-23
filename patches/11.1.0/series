@@ -53,3 +53,4 @@
 11.1.0/0053-panda-main_loop_wait-callback-at-each-main-loop-iter.patch
 11.1.0/0054-panda-after_loadvm-callback-when-load_snapshot-succe.patch
 11.1.0/0055-hw-block-pflash_cfi01-one-post_load-state-handler-at-a-time.patch
+11.1.0/0056-hw-core-loader-rom_reset-logs-the-RAM-it-rewrites.patch
