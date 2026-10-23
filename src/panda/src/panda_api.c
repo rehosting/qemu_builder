@@ -23,6 +23,12 @@
 #include "system/cpus.h"
 #include "panda/callbacks/cb-support.h"
 #include "panda/wrap_ops.h"
+#include "accel/tcg/hooks.h"
+
+void panda_mark_hook_address(target_ulong pc)
+{
+    tcg_hooks_mark_pc(pc);
+}
 
 // call main_aux and run everything up to and including panda_callbacks_after_machine_init
 int panda_init(int argc, char **argv, char **envp) {

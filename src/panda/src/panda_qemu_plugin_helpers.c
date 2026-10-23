@@ -164,12 +164,17 @@ void panda_end_block_flush(CPUState *cpu){
 }
 
 void panda_callbacks_block_longjmp(CPUState *cpu){
+    /* An end/after callback that itself left by longjmp never restored `ending`. */
+    if (cpu->cpu_index < PANDA_END_SLOTS) {
+        ending[cpu->cpu_index].tb = NULL;
+    }
     panda_block_end(cpu, TB_EXIT_REQUESTED);
 }
 
 void panda_end_block_drop_all(void){
     for (int i = 0; i < PANDA_END_SLOTS; i++) {
         pending[i].tb = NULL;
+        ending[i].tb = NULL;
     }
 }
 

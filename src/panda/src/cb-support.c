@@ -111,9 +111,12 @@ MAKE_CALLBACK(void, AFTER_CPU_EXEC_ENTER, after_cpu_exec_enter,
 MAKE_CALLBACK(void, BEFORE_CPU_EXEC_EXIT, before_cpu_exec_exit,
                     CPUState*, cpu, bool, ranBlock);
 
-// Not macroized. (A fast restore learns that loadvm rewrote RAM from panda_before_loadvm.)
+// Not macroized: the process identifier's state (x86 KPTI) is decided again first, and the walk
+// is counted so an unload asked for from a callback waits for it. (A fast restore learns that
+// loadvm rewrote RAM from panda_before_loadvm.)
 void PCB(after_loadvm)(CPUState *env) {
     panda_cb_list *plist;
+    panda_asid_after_loadvm(env ? env : first_cpu);
     panda_main_walk_depth++;
     for (plist = panda_cbs[PANDA_CB_AFTER_LOADVM]; plist != NULL; plist = panda_cb_list_next(plist)) {
         if (plist->enabled)
