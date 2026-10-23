@@ -260,8 +260,9 @@ int map_memory(char *name, uint64_t size, uint64_t address) {
     return err ? -1 : 0;
 }
 
+/* The running vCPU; first_cpu outside a vCPU thread (current_cpu is NULL in the main loop). */
 CPUState* get_cpu(void) {
-  return current_cpu;
+  return current_cpu ? current_cpu : first_cpu;
 }
 
 int panda_cpu_get_index(CPUState *q){
