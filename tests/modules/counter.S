@@ -1,6 +1,6 @@
 /* aarch64 guest for tests/modules/run.sh: reads ext-counter's ID, writes it 3 times, reads the
- * count, prints "ID=<id> COUNT=<n>" on the PL011 of -M virt (or the configurable machine's), and
- * exits through semihosting. */
+ * count and the module's qemu_get_thread_id() register, prints "ID=<id> COUNT=<n> SELF=<v>" on
+ * the PL011 of -M virt (or the configurable machine's), and exits through semihosting. */
     .equ UART, 0x09000000
     .equ CNTR, 0x0b000000
     .globl _start
@@ -14,6 +14,7 @@ _start:
     str w9, [x10, #4]
     str w9, [x10, #4]
     ldr w20, [x10, #8]
+    ldr w21, [x10, #12]
     adr x0, s_id
     bl puts
     mov x0, x19
@@ -21,6 +22,10 @@ _start:
     adr x0, s_count
     bl puts
     mov x0, x20
+    bl puthex
+    adr x0, s_self
+    bl puts
+    mov x0, x21
     bl puthex
     adr x0, s_nl
     bl puts
@@ -57,6 +62,7 @@ puthex:
     .ltorg
 s_id:    .asciz "ID="
 s_count: .asciz " COUNT="
+s_self:  .asciz " SELF="
 s_nl:    .asciz "\n"
     .balign 8
 block: .quad 0x20026, 0

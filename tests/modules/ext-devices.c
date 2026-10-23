@@ -1,8 +1,8 @@
 /*
  * Test panda module: two devices, built with the board SDK (panda-board-cc).
  *  - ext-counter: bus-less and user-creatable, so -device ext-counter,addr=A maps it.
- *    Reads at 0: ID 0x434e5452 ("CNTR"); writes at 4 count; reads at 8: the count.
- *    Its count is in vmstate.
+ *    Reads at 0: ID 0x434e5452 ("CNTR"); writes at 4 count; reads at 8: the count;
+ *    reads at 0xc: qemu_get_thread_id() (below). Its count is in vmstate.
  *  - ext-nostate: a sysbus device with no vmstate, for the guard that warns about it.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -14,6 +14,17 @@
 #include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
+
+/*
+ * Same name as an engine function (util/oslib-posix.c), which the executable exports
+ * (--export-dynamic). Built with the SDK (-fvisibility=hidden, -Bsymbolic) the module's own
+ * calls bind to this copy, and the guest reads 0x4d4f4453 ("MODS") at 0xc; without them,
+ * ELF symbol lookup finds the executable's first and the guest reads a host thread id.
+ */
+int qemu_get_thread_id(void)
+{
+    return 0x4d4f4453;
+}
 
 #define TYPE_EXT_COUNTER "ext-counter"
 OBJECT_DECLARE_SIMPLE_TYPE(ExtCounterState, EXT_COUNTER)
@@ -32,6 +43,7 @@ static uint64_t ext_counter_read(void *opaque, hwaddr off, unsigned size)
     switch (off) {
     case 0x0: return 0x434e5452;
     case 0x8: return s->count;
+    case 0xc: return qemu_get_thread_id();
     default:  return 0;
     }
 }
@@ -49,7 +61,7 @@ static void ext_counter_write(void *opaque, hwaddr off, uint64_t val,
 static const MemoryRegionOps ext_counter_ops = {
     .read = ext_counter_read,
     .write = ext_counter_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 4 },
 };
 
@@ -116,7 +128,7 @@ static void ext_nostate_write(void *opaque, hwaddr off, uint64_t val,
 static const MemoryRegionOps ext_nostate_ops = {
     .read = ext_nostate_read,
     .write = ext_nostate_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
 static void ext_nostate_init(Object *obj)

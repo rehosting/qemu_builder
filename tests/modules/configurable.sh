@@ -44,6 +44,16 @@ want "ram-base without RAM" "ram-base is set but there is no RAM" $M,ram-base=0x
 want "QAPI type check (keyval)" "region.0.base.*(uint64|integer)" $M,region.0.name=a,region.0.base=xyz,region.0.size=1 -cpu cortex-a53
 want "QAPI enum check" "Parameter '(region.0.)?kind' does not accept value 'flash'" \
      $M,region.0.name=a,region.0.base=0,region.0.size=1,region.0.kind=flash -cpu cortex-a53
+# B8: id 'cpu' is the CPU's; region names are capped (RAMBlock ids are cut at 256 bytes); an ELF
+# for another CPU is an error, not a raw image; an M-profile CPU needs the NVIC.
+want "device id 'cpu'" "device\[0\] \(pl011\): id 'cpu' is taken" \
+     $M,device.0.type=pl011,device.0.id=cpu,device.0.mmio.0=0x9000000 -cpu cortex-a53
+long=$(printf 'r%.0s' $(seq 300))
+want "region name too long" "region\[0\]: name 'rrrrrrrrrrrrrrrrrrrr...' is longer than 128 characters" \
+     $M,region.0.name=$long,region.0.base=0,region.0.size=0x1000 -cpu cortex-a53
+want "an ELF for another CPU (aarch64 ELF, arm CPU)" "-kernel /bin/true: .*(ELF machine|architecture).*this CPU takes ELF machine 40" \
+     $M,ram-base=0x40000000 -m 16M -cpu cortex-a15 -kernel /bin/true
+want "an M-profile CPU" "cortex-m3[-a-z]* is an M-profile CPU: it needs an NVIC" $M -cpu cortex-m3
 
 # QMP in preconfig: the same properties as JSON values, then the machine is built.
 out=$( (echo '{"execute":"qmp_capabilities"}'; sleep 0.3
@@ -51,10 +61,14 @@ out=$( (echo '{"execute":"qmp_capabilities"}'; sleep 0.3
   echo '{"execute":"qom-set","arguments":{"path":"/machine","property":"device","value":[{"type":"pl011","mmio":[150994944],"prop":{"chardev":"serial0"}}]}}'; sleep 0.3
   echo '{"execute":"x-exit-preconfig"}'; sleep 0.5
   echo '{"execute":"human-monitor-command","arguments":{"command-line":"info mtree -f"}}'; sleep 0.5
+  echo '{"execute":"qom-set","arguments":{"path":"/machine","property":"entry","value":4096}}'; sleep 0.3
   echo '{"execute":"quit"}') | timeout 10 "$Q" -M configurable -cpu cortex-a53 -preconfig -qmp stdio -display none -serial null 2>&1)
 if grep -q "0000000040000000-000000004000ffff (prio 0, ram): configurable.ram0" <<< "$out" &&
    grep -q "0000000009000000-0000000009000fff (prio 0, i/o): pl011" <<< "$out" &&
    grep -q "configurable.io" <<< "$out"; then echo "PASS QMP preconfig: qom-set region/device, x-exit-preconfig builds them"
 else echo "FAIL QMP preconfig: $out"; fail=1; fi
+if grep -q "'entry' can't change once the machine is built" <<< "$out"; then
+  echo "PASS qom-set of a machine property after the machine is built is refused"
+else echo "FAIL qom-set after init: $out"; fail=1; fi
 rm -rf $T
 exit $fail
