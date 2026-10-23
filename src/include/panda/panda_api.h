@@ -66,6 +66,22 @@ void panda_cont(void);
 void panda_main_loop_kick(void);
 
 
+/**
+ * panda_fast_snap() - Snapshot RAM and device state in host memory (prototype).
+ *
+ * Main loop. No disk state. Return: 0 on success.
+ */
+int panda_fast_snap(void);
+
+
+/**
+ * panda_fast_restore() - Restore the panda_fast_snap() state; the VM stays stopped.
+ *
+ * Main loop. The disk is not restored. Return: 0 on success.
+ */
+int panda_fast_restore(void);
+
+
 // Not an API function.
 void _panda_set_library_mode(const bool);
 

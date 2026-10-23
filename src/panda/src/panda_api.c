@@ -11,6 +11,11 @@
 #include "qapi/error.h"
 #include "migration/vmstate.h"
 #include "migration/snapshot.h"
+#include "migration/savevm.h"
+#include "migration/qemu-file.h"
+#include "io/channel-buffer.h"
+#include "system/ramblock.h"
+#include "exec/tb-flush.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "system/memory.h"
@@ -61,6 +66,91 @@ void panda_stop(int code) {
 
 void panda_cont(void) {
     vm_start();
+}
+
+/*
+ * Fast snapshot/restore in host memory (prototype, for fuzzing): every RAM block copied whole,
+ * the devices' vmstate (no RAM, no disk) in a buffer, as COLO checkpoints do. Main loop, VM
+ * stopped. The disk is not restored.
+ */
+typedef struct FastRAM { RAMBlock *rb; void *copy; size_t len; } FastRAM;
+static GArray *fast_ram;
+static uint8_t *fast_dev;
+static size_t fast_dev_len;
+
+static int fast_ram_save(RAMBlock *rb, void *opaque) {
+    FastRAM r = { rb, NULL, qemu_ram_get_used_length(rb) };
+    r.copy = g_malloc(r.len);
+    memcpy(r.copy, qemu_ram_get_host_addr(rb), r.len);
+    g_array_append_val(fast_ram, r);
+    return 0;
+}
+
+int panda_fast_snap(void) {
+    Error *err = NULL;
+    QIOChannelBuffer *bioc;
+    QEMUFile *f;
+
+    if (runstate_is_running()) {
+        vm_stop(RUN_STATE_SAVE_VM);
+    }
+    if (fast_ram) {
+        for (guint i = 0; i < fast_ram->len; i++) {
+            g_free(g_array_index(fast_ram, FastRAM, i).copy);
+        }
+        g_array_free(fast_ram, true);
+    }
+    fast_ram = g_array_new(false, false, sizeof(FastRAM));
+    qemu_ram_foreach_block(fast_ram_save, NULL);
+
+    bioc = qio_channel_buffer_new(4096);
+    f = qemu_file_new_output(QIO_CHANNEL(bioc));
+    if (qemu_save_device_state(f, &err) < 0) {
+        error_report_err(err);
+        qemu_fclose(f);
+        object_unref(OBJECT(bioc));
+        return -1;
+    }
+    qemu_fflush(f);
+    g_free(fast_dev);
+    fast_dev_len = bioc->usage;
+    fast_dev = g_memdup2(bioc->data, fast_dev_len);
+    qemu_fclose(f);
+    object_unref(OBJECT(bioc));
+    return 0;
+}
+
+int panda_fast_restore(void) {
+    Error *err = NULL;
+    QIOChannelBuffer *bioc;
+    QEMUFile *f;
+    int ret;
+
+    if (!fast_ram) {
+        return -1;
+    }
+    if (runstate_is_running()) {
+        vm_stop(RUN_STATE_RESTORE_VM);
+    }
+    for (guint i = 0; i < fast_ram->len; i++) {
+        FastRAM *r = &g_array_index(fast_ram, FastRAM, i);
+        memcpy(qemu_ram_get_host_addr(r->rb), r->copy, r->len);
+    }
+    tb_flush__exclusive_or_serial();  /* code in RAM may have changed under the TBs */
+
+    qemu_system_reset(SHUTDOWN_CAUSE_SNAPSHOT_LOAD);
+    bioc = qio_channel_buffer_new(fast_dev_len);
+    memcpy(bioc->data, fast_dev, fast_dev_len);
+    bioc->usage = fast_dev_len;
+    f = qemu_file_new_input(QIO_CHANNEL(bioc));
+    ret = qemu_load_device_state(f, &err);
+    qemu_fclose(f);
+    object_unref(OBJECT(bioc));
+    if (ret < 0) {
+        error_report_err(err);
+        return -1;
+    }
+    return 0;
 }
 
 void panda_main_loop_kick(void) {
