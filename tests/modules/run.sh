@@ -90,6 +90,16 @@ run -module "$OUT/ext-devices.so" -module "$OUT/ext-copy.so" -M none > "$OUT/7b.
 ok "two modules with the same type name: an error naming the first (rc=$rc)" \
    '[ $rc = 1 ] && grep -q "ext-copy.so registers QOM type .ext-counter., already registered by .*ext-devices.so" "$OUT/7b.out"'
 
+# 9. the SDK names the host headers it needs; panda-board-cc checks them up front
+python3 - "$OUT/sdk-other/panda-sdk.json" <<'PY2'
+import json, sys
+j = json.load(open(sys.argv[1])); j["host_includes"] = j.get("host_includes", []) + ["/nonexistent/glib-2.0"]
+json.dump(j, open(sys.argv[1], "w"))
+PY2
+"$OUT/sdk-other/bin/panda-board-cc" aarch64-softmmu -o "$OUT/ext-nohost.so" "$H/ext-devices.c" > "$OUT/9.out" 2>&1; rc=$?
+ok "panda-board-cc refuses up front when the SDK's host headers are missing" \
+   '[ $rc != 0 ] && grep -q "host headers that are not here: /nonexistent/glib-2.0" "$OUT/9.out"'
+
 h=$("$Q" -module help | awk '{print $3}')
 ok "-module help prints the SDK's ABI hash" '[ "$h" = "$(python3 -c "import json;print(json.load(open(\"$SDK/panda-sdk.json\"))[\"panda_abi\"])")" ]'
 exit $fail

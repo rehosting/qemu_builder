@@ -69,7 +69,12 @@ for t in targets:
     cflags[t] = {"cc": cc, "flags": flags}
     with open(os.path.join(out, f"cflags.{t}"), "w") as f:
         f.write(" ".join(shlex.quote(a) for a in flags) + "\n")
+# Host library headers (glib, pixman, ...) the cflags name by absolute path: panda-board-cc
+# checks they exist, so a module built outside the engine's environment fails up front.
+host = sorted({a[2:] if a.startswith("-I") else a for c in cflags.values() for a in c["flags"]
+               if a.startswith("-I/")})
 json.dump({"panda_abi": abi, "targets": sorted(cflags), "cc": next(iter(cflags.values()))["cc"],
+           "host_includes": host, "module_info_version": 1,
            "qemu_version": open(os.path.join(src, "VERSION")).read().strip(),
            "workdir": "src/build"}, open(os.path.join(out, "panda-sdk.json"), "w"), indent=1)
 PY
@@ -95,6 +100,9 @@ for i in "${!extra[@]}"; do
     case "${extra[$i]}" in -I/*) ;; -I*) extra[$i]="-I$(realpath "${extra[$i]#-I}")" ;; esac
 done
 CC=${CC:-$(python3 -c "import json;print(json.load(open('$SDK/panda-sdk.json'))['cc'])")}
+missing=$(python3 -c "import json,os;print(' '.join(p for p in json.load(open('$SDK/panda-sdk.json')).get('host_includes',[]) if not os.path.isdir(p)))")
+[ -z "$missing" ] || { echo "panda-board-cc: this SDK's engine was built with host headers that are not here: $missing" >&2
+    echo "(on nix, build with the flake's mkBoard, which brings them; elsewhere install the same glib/pixman -dev packages there)" >&2; exit 1; }
 eval "flags=($(cat "$SDK/cflags.$T"))"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 objs=(); pids=(); fail=0
