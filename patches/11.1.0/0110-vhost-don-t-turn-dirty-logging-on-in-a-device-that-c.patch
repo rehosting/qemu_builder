@@ -12,7 +12,10 @@ snapshots take GLOBAL_DIRTY_DIRTY_RATE/_LIMIT with the VM running, and
 vhost_log_global_start() then asks the backend to log anyway. For a
 backend without VHOST_F_LOG_ALL the next vhost_dev_start() sends
 VHOST_USER_SET_FEATURES with the bit set; rust-vmm's vhost-device-vsock
-0.3.0 rejects it and drops the connection:
+0.3.0 rejects it and drops the connection. Seen with an in-memory snapshot
+that holds GLOBAL_DIRTY_DIRTY_RATE across a "cont" (PANDA's
+panda_fast_snap), with a vhost-user-vsock-pci device the guest had started;
+by code reading calc-dirty-rate's dirty-bitmap mode takes the same path:
 
     vhost_set_features failed: Input/output error (5)
     Error starting vhost: 5
