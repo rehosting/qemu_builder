@@ -10,6 +10,7 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "cpu.h"
+#include "panda/plugin.h"
 #include "panda/callbacks/cb-support.h"
 #include "panda/hooks.h"
 #include "panda-abi.h"
