@@ -344,8 +344,14 @@ int panda_fast_restore(void) {
     if (!fast_blocks || !fast_dev) {
         return -1;
     }
+    /*
+     * PAUSED, not RESTORE_VM: tcg_vm_change_state flushes every TB on a stop to RESTORE_VM
+     * (loadvm rewrites RAM behind the TBs). This restore invalidates the TBs of the pages it
+     * copies back itself (and flushes on a full copy), so that flush would only cost the
+     * retranslation of everything, every iteration (rehosting's fastsnap avoids it the same way).
+     */
     if (runstate_is_running()) {
-        vm_stop(RUN_STATE_RESTORE_VM);
+        vm_stop(RUN_STATE_PAUSED);
     }
     if (!fast_layout_same()) {
         error_report("panda_fast_restore: RAM blocks changed since panda_fast_snap");
