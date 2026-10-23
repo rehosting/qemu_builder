@@ -306,17 +306,9 @@ extern bool panda_plugin_to_unload;
 extern int nb_panda_plugins;
 extern panda_plugin panda_plugins[MAX_PANDA_PLUGINS];
 
+// Plugin unloads requested from a callback no longer happen here, on the vCPU: they need every
+// vCPU out of the plugin's code (callbacks.c, panda_unload_later).
 void PCB(before_find_fast)(void) {
-    if (panda_plugin_to_unload) {
-        panda_plugin_to_unload = false;
-        for (int i = 0; i < nb_panda_plugins;) {
-            if (panda_plugins[i].unload) {
-                panda_do_unload_plugin(i);
-            } else {
-                i++;
-            }
-        }
-    }
     if (panda_flush_tb()) {
         queue_tb_flush(current_cpu);
         cpu_loop_exit(current_cpu);

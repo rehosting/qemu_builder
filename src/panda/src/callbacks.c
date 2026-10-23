@@ -32,6 +32,15 @@ PANDAENDCOMMENT */
 #include "panda/callbacks/cb-trampolines.h"
 #include "panda/callbacks/cb-support.h"
 
+#include "qemu/rcu.h"
+#include "qemu/thread.h"
+#include "qemu/lockable.h"
+#include "qemu/main-loop.h"
+#include "qemu/aio.h"
+#include "hw/core/cpu.h"
+#include "system/cpus.h"
+#include "system/runstate.h"
+
 #define SOFTMMU_DIR "/" TARGET_NAME "-softmmu"
 #define LIBRARY_NAME "/libpanda-" TARGET_NAME ".so"
 #define PLUGIN_DIR "/" TARGET_NAME "-softmmu/panda/plugins/"
@@ -452,6 +461,35 @@ void panda_require(const char *plugin_name) {
     _panda_require(plugin_name, NULL, 0, false);
 }
 
+/*
+ * Unloading a plugin runs its uninit_plugin and dlcloses it, so no vCPU may be inside its code, and
+ * none may reach it afterwards. vCPUs run callbacks without the BQL, so a plugin is only unloaded on
+ * the main thread, with the BQL, while the vCPUs are paused: if the VM is running, its vCPUs are
+ * paused around the unload (pause_all_vcpus, which waits with the BQL dropped, as vm_stop does) and
+ * resumed after, without a runstate change. A request from anywhere else (a vCPU, a thread without
+ * the BQL) marks the plugins and leaves the unload to a main-loop bottom half.
+ */
+static bool panda_on_main_thread(void)
+{
+    return bql_locked() && !current_cpu && qemu_in_main_thread();
+}
+
+static bool panda_vcpus_pause(void)
+{
+    if (runstate_is_running()) {
+        pause_all_vcpus();
+        return true;
+    }
+    return false;
+}
+
+static void panda_vcpus_resume(bool paused)
+{
+    if (paused) {
+        resume_all_vcpus();
+    }
+}
+
 void panda_do_unload_plugin(int plugin_idx)
 {
     void *plugin = panda_plugins[plugin_idx].plugin;
@@ -464,6 +502,36 @@ void panda_do_unload_plugin(int plugin_idx)
     }
     panda_unregister_callbacks(plugin);
     dlclose_plugin(plugin_idx);
+}
+
+static void panda_unload_marked(void)
+{
+    bool paused = panda_vcpus_pause();
+    panda_plugin_to_unload = false;
+    for (int i = 0; i < nb_panda_plugins;) {
+        if (panda_plugins[i].unload) {
+            panda_do_unload_plugin(i);
+        } else {
+            i++;
+        }
+    }
+    panda_vcpus_resume(paused);
+}
+
+static bool panda_unload_bh_queued;
+
+static void panda_unload_bh(void *opaque)
+{
+    qatomic_set(&panda_unload_bh_queued, false);
+    panda_unload_marked();
+}
+
+static void panda_unload_later(void)
+{
+    panda_plugin_to_unload = true;
+    if (!qatomic_xchg(&panda_unload_bh_queued, true)) {
+        aio_bh_schedule_oneshot(qemu_get_aio_context(), panda_unload_bh, NULL);
+    }
 }
 
 void panda_unload_plugin(void *plugin)
@@ -486,22 +554,34 @@ void panda_unload_plugin_by_name(const char *plugin_name) {
     }
 }
 
+/* Asynchronous: the plugin goes at the next main-loop iteration (see above). */
 void panda_unload_plugin_idx(int plugin_idx)
 {
     if (plugin_idx >= nb_panda_plugins || plugin_idx < 0) {
         return;
     }
-    panda_plugin_to_unload = true;
     panda_plugins[plugin_idx].unload = true;
+    panda_unload_later();
 }
 
+/* Synchronous on the main thread with the BQL (pandare2 calls it from the main loop); from
+ * anywhere else, as panda_unload_plugin_idx for every plugin. */
 void panda_unload_plugins(void)
 {
+    if (!panda_on_main_thread()) {
+        for (int i = 0; i < nb_panda_plugins; i++) {
+            panda_plugins[i].unload = true;
+        }
+        panda_unload_later();
+        return;
+    }
+    bool paused = panda_vcpus_pause();
     // Unload them starting from the end to avoid having to shuffle everything
     // down each time
     while (nb_panda_plugins > 0) {
         panda_do_unload_plugin(nb_panda_plugins - 1);
     }
+    panda_vcpus_resume(paused);
 }
 
 void *panda_get_plugin_by_name(const char *plugin_name)
@@ -590,6 +670,40 @@ panda_cb_with_context panda_get_cb_trampoline(panda_cb_type type) {
  * @note Registering a callback function twice from the same plugin will trigger
  * an assertion error.
  */
+/*
+ * Callback lists are walked without a lock: by vCPUs (inside cpu_exec, an RCU read-side critical
+ * section) and by the main thread (with the BQL). Writers (register, unregister, enable, disable)
+ * come from any thread, a vCPU's own callback included, and are serialized by panda_cbs_lock. They
+ * publish a new entry fully built (qatomic_rcu_set) and unlink an entry without touching its own
+ * next pointer, so a walker standing on it continues down the list. An unlinked entry is freed after
+ * an RCU grace period, by the call_rcu thread, which holds the BQL while it frees: so neither a vCPU
+ * nor a main-loop walk can still be on it. Readers pay nothing for this.
+ */
+static QemuMutex panda_cbs_lock;
+
+static void __attribute__((constructor)) panda_cbs_lock_init(void)
+{
+    qemu_mutex_init(&panda_cbs_lock);
+}
+
+typedef struct PandaCbRetired {
+    struct rcu_head rcu;
+    panda_cb_list *node;
+} PandaCbRetired;
+
+static void panda_cb_retired_free(PandaCbRetired *r)
+{
+    g_free(r->node);
+    g_free(r);
+}
+
+static void panda_cb_retire(panda_cb_list *node)
+{
+    PandaCbRetired *r = g_new(PandaCbRetired, 1);
+    r->node = node;
+    call_rcu(r, panda_cb_retired_free, rcu);
+}
+
 /* A callback list changed. Block-exec callbacks run from instrumentation the bridge adds at
  * translation, only while one is registered: the first one registered (and the last one gone)
  * flushes the TBs so code translated before it gets (or loses) the block start; enabling and
@@ -626,7 +740,6 @@ void panda_register_callback(void *plugin, panda_cb_type type, panda_cb cb)
 void panda_register_callback_with_context(void *plugin, panda_cb_type type, panda_cb_with_context cb, void* context)
 {
     panda_cb_list *plist_last = NULL;
-    bool was_registered = panda_cbs[type] != NULL;
 
     panda_cb_list *new_list = g_new0(panda_cb_list, 1);
     new_list->entry = cb;
@@ -635,6 +748,8 @@ void panda_register_callback_with_context(void *plugin, panda_cb_type type, pand
     new_list->context = context;
     assert(type < PANDA_CB_LAST);
 
+    QEMU_LOCK_GUARD(&panda_cbs_lock);
+    bool was_registered = panda_cbs[type] != NULL;
     if (panda_cbs[type] != NULL) {
         for (panda_cb_list *plist = panda_cbs[type]; plist != NULL;
              plist = plist->next) {
@@ -644,10 +759,10 @@ void panda_register_callback_with_context(void *plugin, panda_cb_type type, pand
                      plist->context == context));
             plist_last = plist;
         }
-        plist_last->next = new_list;
         new_list->prev = plist_last;
+        qatomic_rcu_set(&plist_last->next, new_list);
     } else {
-        panda_cbs[type] = new_list;
+        qatomic_rcu_set(&panda_cbs[type], new_list);
     }
     panda_cb_list_changed(type, was_registered);
 }
@@ -699,6 +814,7 @@ void panda_disable_callback_with_context(void *plugin, panda_cb_type type, panda
 {
     bool found = false;
     assert(type < PANDA_CB_LAST);
+    QEMU_LOCK_GUARD(&panda_cbs_lock);
     if (panda_cbs[type] != NULL) {
         panda_cb_with_context trampoline = panda_get_cb_trampoline(type);
         for (panda_cb_list *plist = panda_cbs[type]; plist != NULL;
@@ -713,7 +829,7 @@ void panda_disable_callback_with_context(void *plugin, panda_cb_type type, panda
                 ))
             ) {
                 found = true;
-                plist->enabled = false;
+                qatomic_set(&plist->enabled, false);
                 panda_cb_list_changed(type, true);
 
                 // break out of the loop - the same plugin can register the same
@@ -752,6 +868,7 @@ void panda_enable_callback(void *plugin, panda_cb_type type, panda_cb cb) {
 void panda_enable_callback_with_context(void *plugin, panda_cb_type type, panda_cb_with_context cb, void* context)
 {
     bool found = false;
+    QEMU_LOCK_GUARD(&panda_cbs_lock);
     if (panda_cbs[type] != NULL) {
         panda_cb_with_context trampoline = panda_get_cb_trampoline(type);
         for (panda_cb_list *plist = panda_cbs[type]; plist != NULL; plist = plist->next)
@@ -767,7 +884,7 @@ void panda_enable_callback_with_context(void *plugin, panda_cb_type type, panda_
                 ))
             ) {
                 found = true;
-                plist->enabled = true;
+                qatomic_set(&plist->enabled, true);
                 panda_cb_list_changed(type, true);
 
                 // break out of the loop - the same plugin can register the same
@@ -789,36 +906,26 @@ void panda_enable_callback_with_context(void *plugin, panda_cb_type type, panda_
  */
 void panda_unregister_callbacks(void *plugin)
 {
+    QEMU_LOCK_GUARD(&panda_cbs_lock);
     for (int i = 0; i < PANDA_CB_LAST; i++) {
-        panda_cb_list *plist;
-        plist = panda_cbs[i];
-        panda_cb_list *plist_head = plist;
-        bool was_registered = plist != NULL;
+        bool was_registered = panda_cbs[i] != NULL;
+        panda_cb_list *plist = panda_cbs[i];
         while (plist != NULL) {
             panda_cb_list *plist_next = plist->next;
             if (plist->owner == plugin) {
-                // delete this entry -- it belongs to our plugin
-                panda_cb_list *del_plist = plist;
-                if (plist->next == NULL && plist->prev == NULL) {
-                    // its the only thing in the list -- list is now empty
-                    plist_head = NULL;
+                // Unlink this entry (its own next stays: a walker on it goes on), free it later
+                if (plist->prev) {
+                    qatomic_set(&plist->prev->next, plist_next);
                 } else {
-                    // Unlink this entry
-                    if (plist->prev)
-                        plist->prev->next = plist->next;
-                    if (plist->next)
-                        plist->next->prev = plist->prev;
-                    // new head
-                    if (plist == plist_head)
-                        plist_head = plist->next;
+                    qatomic_set(&panda_cbs[i], plist_next);
                 }
-                // Free the entry we just unlinked
-                g_free(del_plist);
+                if (plist_next) {
+                    plist_next->prev = plist->prev;
+                }
+                panda_cb_retire(plist);
             }
             plist = plist_next;
         }
-        // update head
-        panda_cbs[i] = plist_head;
         panda_cb_list_changed(i, was_registered);
     }
 }
@@ -832,12 +939,13 @@ void panda_unregister_callbacks(void *plugin)
  */
 void panda_enable_plugin(void *plugin)
 {
+    QEMU_LOCK_GUARD(&panda_cbs_lock);
     for (int i = 0; i < PANDA_CB_LAST; i++) {
         panda_cb_list *plist;
         plist = panda_cbs[i];
         while (plist != NULL) {
             if (plist->owner == plugin) {
-                plist->enabled = true;
+                qatomic_set(&plist->enabled, true);
             }
             plist = plist->next;
         }
@@ -854,12 +962,13 @@ void panda_enable_plugin(void *plugin)
  */
 void panda_disable_plugin(void *plugin)
 {
+    QEMU_LOCK_GUARD(&panda_cbs_lock);
     for (int i = 0; i < PANDA_CB_LAST; i++) {
         panda_cb_list *plist;
         plist = panda_cbs[i];
         while (plist != NULL) {
             if (plist->owner == plugin) {
-                plist->enabled = false;
+                qatomic_set(&plist->enabled, false);
             }
             plist = plist->next;
         }
@@ -873,9 +982,9 @@ void panda_disable_plugin(void *plugin)
  */
 panda_cb_list *panda_cb_list_next(panda_cb_list *plist)
 {
-    for (panda_cb_list *node = plist->next; node != NULL;
-         node = node->next) {
-        if (!node || node->enabled)
+    for (panda_cb_list *node = qatomic_read(&plist->next); node != NULL;
+         node = qatomic_read(&node->next)) {
+        if (node->enabled)
             return node;
     }
     return NULL;
