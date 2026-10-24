@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Sat, 24 Oct 2026 19:46:57 -0400
+Subject: [PATCH] accel/tcg: rr vCPU loop takes the replay mutex if replay
+ started under it
+
+The round-robin vCPU loop does
+
+    bql_unlock(); replay_mutex_lock(); bql_lock();
+    ... icount accounting and timers ...
+    replay_mutex_unlock();
+
+With replay off, the lock is a no-op. If the vCPU thread is waiting in
+bql_lock() at that point while the main loop runs x-rr-begin-record
+(0039), replay_enable() switches to RECORD and hands the mutex to the
+main thread (replay_mutex_init()). The vCPU then gets the BQL, runs the
+icount part without the mutex, and calls replay_mutex_unlock() with
+replay on and the mutex not held:
+
+    replay_mutex_unlock: assertion failed: (replay_mutex_locked())
+
+A stop and cont (or a loadvm and vm_start just before the begin, as
+PANDA's begin_record with a snapshot does) kicks the vCPU out of
+rr_wait_io_event() into exactly that window, so it shows up as an
+intermittent abort at the start of a recording.
+
+replay_mode only changes under the BQL, so once the vCPU has the BQL the
+mode is stable: if replay is on and this thread does not hold the
+mutex, drop the BQL and take both again in lock order. The VM is
+stopped across the switch, so no guest event is lost or reordered.
+Costs one well-predicted branch per loop iteration when replay is off.
+---
+ accel/tcg/tcg-accel-ops-rr.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/accel/tcg/tcg-accel-ops-rr.c b/accel/tcg/tcg-accel-ops-rr.c
+index cdaa3e118082d7f100dd7655e57e28b55418d294..94755a2cfb70fa000552dc5dd42ff401a0c28f65 100644
+--- a/accel/tcg/tcg-accel-ops-rr.c
++++ b/accel/tcg/tcg-accel-ops-rr.c
+@@ -239,6 +239,19 @@ static void *rr_cpu_thread_fn(void *arg)
+         bql_unlock();
+         replay_mutex_lock();
+         bql_lock();
++        /*
++         * x-rr-begin-record and x-rr-begin-replay turn record/replay on
++         * from the main loop, under the BQL.  If that happened while we
++         * waited for the BQL, the lock above was a no-op (replay was off)
++         * and we hold the BQL without the replay mutex: take it now, in
++         * lock order.  replay_mode only changes under the BQL, so it is
++         * stable here.
++         */
++        while (replay_mode != REPLAY_MODE_NONE && !replay_mutex_locked()) {
++            bql_unlock();
++            replay_mutex_lock();
++            bql_lock();
++        }
+ 
+         if (icount_enabled()) {
+             int cpu_count = rr_cpu_count();

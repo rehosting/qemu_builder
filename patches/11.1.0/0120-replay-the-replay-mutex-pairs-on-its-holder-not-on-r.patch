@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Sat, 24 Oct 2026 19:46:57 -0400
+Subject: [PATCH] replay: the replay mutex pairs on its holder, not on
+ replay_mode
+
+replay_mutex_lock() and replay_mutex_unlock() are no-ops while
+replay_mode is NONE and assume the mode never changes in between.
+x-rr-end-record (0040) breaks that: it sets the mode to NONE in a QMP
+command, i.e. while the main loop holds the mutex. The main loop's
+unlock before its next poll is then a no-op, the thread-local flag stays
+set and the ticket counters stay one apart. The next x-rr-begin-record
+calls replay_mutex_init() again, which re-initializes the mutex and
+takes one more ticket, so mutex_tail runs two ahead of mutex_head: the
+first replay_mutex_lock() after that begin waits for ever.
+
+Unlock now releases whatever this thread holds, in any mode (and still
+asserts if it holds nothing while record/replay is on).
+replay_mutex_init() initializes the mutex and condition once, and gives
+the caller the mutex only if it does not hold it already (an end and a
+begin in the same main-loop iteration); it asserts that nobody else does.
+---
+ replay/replay-internal.c | 48 ++++++++++++++++++++++++++++++++++------
+ 1 file changed, 41 insertions(+), 7 deletions(-)
+
+diff --git a/replay/replay-internal.c b/replay/replay-internal.c
+index 4839f2b63213898461922c9d5e6fcd3c7704c2f7..7c60720cce6606585871c9dcf075c0fc1b0b5c0f 100644
+--- a/replay/replay-internal.c
++++ b/replay/replay-internal.c
+@@ -231,15 +231,42 @@ void replay_finish_event(void)
+     replay_fetch_data_kind();
+ }
+ 
++/*
++ * Whether *this thread* holds the replay mutex.  Lock and unlock pair on this,
++ * not on replay_mode: x-rr-begin-record and x-rr-end-record switch the mode
++ * at run time, and a thread whose lock ran in one mode may unlock in another.
++ */
+ static __thread bool replay_locked;
+ 
+ void replay_mutex_init(void)
+ {
+-    qemu_mutex_init(&lock);
+-    qemu_cond_init(&mutex_cond);
+-    /* Hold the mutex while we start-up */
+-    replay_locked = true;
+-    ++mutex_tail;
++    static bool initialized;
++
++    /*
++     * Called each time record/replay starts: at startup, and again by every
++     * x-rr-begin-record / x-rr-begin-replay.  Initialize once; re-initializing
++     * would reset a mutex that a previous recording's threads used.
++     */
++    if (!initialized) {
++        qemu_mutex_init(&lock);
++        qemu_cond_init(&mutex_cond);
++        initialized = true;
++    }
++    /*
++     * Hold the mutex while we start up: the caller (vl.c, or the main loop
++     * running a QMP command) holds the BQL and leaves through a
++     * replay_mutex_unlock().  It may still hold the mutex from a recording
++     * that ended in this same main-loop iteration; then it keeps it.
++     * Otherwise nobody holds it: with replay_mode == NONE, lock is a no-op,
++     * and unlock below releases a mutex held across the end of a recording.
++     */
++    if (!replay_locked) {
++        qemu_mutex_lock(&lock);
++        g_assert(mutex_head == mutex_tail);
++        ++mutex_tail;
++        replay_locked = true;
++        qemu_mutex_unlock(&lock);
++    }
+ }
+ 
+ bool replay_mutex_locked(void)
+@@ -266,13 +293,20 @@ void replay_mutex_lock(void)
+ 
+ void replay_mutex_unlock(void)
+ {
+-    if (replay_mode != REPLAY_MODE_NONE) {
+-        g_assert(replay_mutex_locked());
++    /*
++     * Release what this thread took, whatever the mode is now: if the
++     * recording ended while we held the mutex, it is still ours to give back
++     * (else the next recording's first lock would wait for ever).  Unlocking
++     * a mutex we don't hold is a bug while record/replay is on.
++     */
++    if (replay_locked) {
+         qemu_mutex_lock(&lock);
+         ++mutex_head;
+         replay_locked = false;
+         qemu_cond_broadcast(&mutex_cond);
+         qemu_mutex_unlock(&lock);
++    } else {
++        g_assert(replay_mode == REPLAY_MODE_NONE);
+     }
+ }
+ 

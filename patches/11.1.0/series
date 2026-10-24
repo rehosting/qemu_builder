@@ -63,3 +63,5 @@
 11.1.0/0081-target-arm-a-snapshot-loads-across-icount-on-off-PMC.patch
 11.1.0/0082-target-riscv-log-hardware-A-D-page-table-updates-as-.patch
 11.1.0/0090-plugins-keep-the-access-direction-clear-of-the-MemOp.patch
+11.1.0/0120-replay-the-replay-mutex-pairs-on-its-holder-not-on-r.patch
+11.1.0/0121-accel-tcg-rr-vCPU-loop-takes-the-replay-mutex-if-rep.patch
