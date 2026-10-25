@@ -45,7 +45,8 @@ ok "... and about a built-in device without vmstate that the configurable machin
    'grep -q "device /machine/peripheral/unimp (unimplemented-device, built in) has no vmstate" "$OUT/2.out"'
 ok "... but not about pl011 (it has vmstate)" '! grep -q "(pl011, .*no vmstate" "$OUT/2.out"'
 
-rm -rf "$OUT/sdk-other"; cp -r "$SDK" "$OUT/sdk-other"; chmod -R u+w "$OUT/sdk-other"
+# -L and the resolved path: SDK may be a symlink to a nix store path, which must be copied, never edited
+rm -rf "$OUT/sdk-other"; cp -rL "$(cd "$SDK" && pwd -P)/." "$OUT/sdk-other"; chmod -R u+w "$OUT/sdk-other"
 sed -i 's/"\([0-9a-f]\{8\}\)/"deadbeef/' "$OUT/sdk-other/src/build/panda-abi.h"
 "$OUT/sdk-other/bin/panda-board-cc" aarch64-softmmu -o "$OUT/ext-other.so" "$H/ext-devices.c"
 run -module "$OUT/ext-other.so" -M virt -cpu cortex-a53 -kernel "$OUT/counter.elf" -serial none > "$OUT/3.out" 2>&1
@@ -56,7 +57,8 @@ PANDA_MODULE_ABI=ignore run -module "$OUT/ext-other.so" -M virt -cpu cortex-a53 
 ok "PANDA_MODULE_ABI=ignore loads it with a warning" \
    'grep -q "loading anyway" "$OUT/3b.out" && grep -q "COUNT=00000003" "$OUT/3b.out"'
 
-z=$(ldd "$Q" | awk '$1 ~ /^libz\.so/ {print $3}')
+# any shared library the engine links that isn't a module (a nix engine has no libz, only libzstd)
+z=$(ldd "$Q" | awk '$1 ~ /^lib(z|zstd)\.so/ {print $3; exit}')
 run -module "$z" -M virt > "$OUT/4.out" 2>&1
 ok "not a panda module" 'grep -q "is not a panda module" "$OUT/4.out"'
 run -M "$OUT/ext-devices.so" > "$OUT/4b.out" 2>&1
