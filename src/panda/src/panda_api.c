@@ -9,6 +9,7 @@
 
 // for map_memory
 #include "qapi/error.h"
+#include "system/replay.h"
 #include "migration/vmstate.h"
 #include "migration/snapshot.h"
 #include "qemu/error-report.h"
@@ -91,6 +92,11 @@ int panda_snap(char *snapshot_name) {
 
 int panda_revert(char *snapshot_name) {
     Error *err = NULL;
+    /* refused (while recording or replaying) before the VM stops: it keeps running */
+    if (!replay_can_load_snapshot(&err)) {
+        error_report_err(err);
+        return -1;
+    }
     if (runstate_is_running()) {
         vm_stop(RUN_STATE_RESTORE_VM);
     }
