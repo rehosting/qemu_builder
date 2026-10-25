@@ -69,3 +69,4 @@
 11.1.0/0130-module-load-panda-modules-by-path-checked-against-th.patch
 11.1.0/0131-vl-M-PATH-NAME-and-module-PATH-load-panda-modules.patch
 11.1.0/0132-hw-core-build-the-configurable-machine-and-its-QAPI-.patch
+11.1.0/0140-replay-start-snapshot-timers-become-vCPU-work-after-.patch
