@@ -18,16 +18,29 @@ Unlock now releases whatever this thread holds, in any mode (and still
 asserts if it holds nothing while record/replay is on).
 replay_mutex_init() initializes the mutex and condition once, and gives
 the caller the mutex only if it does not hold it already (an end and a
-begin in the same main-loop iteration); it asserts that nobody else does.
+begin in the same main-loop iteration).
+
+A vCPU may still hold or wait for a ticket from the previous recording
+when the next begin runs: async work wakes it while the main loop holds
+the mutex, it queues in the rr loop's replay_mutex_lock(), the recording
+ends, and the main loop's unlock hands the mutex to it. It needs the BQL
+to get to its unlock, so replay_mutex_init() takes a ticket like any
+locker and, if it has to wait, waits with the BQL dropped (lock order:
+replay mutex, then BQL). replay_enable() calls it before the mode leaves
+NONE, so the vCPU it waits for runs that stretch with replay off and
+nothing queues behind; init asserts that. Trace event
+replay_mutex_init_wait when it waits.
 ---
- replay/replay-internal.c | 48 ++++++++++++++++++++++++++++++++++------
- 1 file changed, 41 insertions(+), 7 deletions(-)
+ replay/replay-internal.c | 77 ++++++++++++++++++++++++++++++++++++----
+ replay/replay.c          |  3 +-
+ replay/trace-events      |  1 +
+ 3 files changed, 73 insertions(+), 8 deletions(-)
 
 diff --git a/replay/replay-internal.c b/replay/replay-internal.c
-index 4839f2b63213898461922c9d5e6fcd3c7704c2f7..7c60720cce6606585871c9dcf075c0fc1b0b5c0f 100644
+index 4839f2b63213898461922c9d5e6fcd3c7704c2f7..c7030b93edf0ff590f35f7b59227c78a13f343fa 100644
 --- a/replay/replay-internal.c
 +++ b/replay/replay-internal.c
-@@ -231,15 +231,42 @@ void replay_finish_event(void)
+@@ -231,15 +231,71 @@ void replay_finish_event(void)
      replay_fetch_data_kind();
  }
  
@@ -62,20 +75,49 @@ index 4839f2b63213898461922c9d5e6fcd3c7704c2f7..7c60720cce6606585871c9dcf075c0fc
 +     * running a QMP command) holds the BQL and leaves through a
 +     * replay_mutex_unlock().  It may still hold the mutex from a recording
 +     * that ended in this same main-loop iteration; then it keeps it.
-+     * Otherwise nobody holds it: with replay_mode == NONE, lock is a no-op,
-+     * and unlock below releases a mutex held across the end of a recording.
++     *
++     * Otherwise take a ticket.  Called before replay_mode leaves NONE, so
++     * nobody else queues for one now (lock is a no-op), but a vCPU may
++     * still hold or wait for a ticket it took while the previous recording
++     * ran: it queued in the rr loop's replay_mutex_lock() while the main loop
++     * held the mutex, and x-rr-end-record set the mode to NONE before the
++     * main loop's unlock handed the mutex over.  That vCPU needs the BQL to
++     * get to its unlock, so wait for it with the BQL dropped, in lock order
++     * (replay mutex, then BQL).  The VM is stopped across a begin.
 +     */
 +    if (!replay_locked) {
++        unsigned long id;
++
 +        qemu_mutex_lock(&lock);
-+        g_assert(mutex_head == mutex_tail);
-+        ++mutex_tail;
-+        replay_locked = true;
-+        qemu_mutex_unlock(&lock);
++        id = mutex_tail++;
++        if (id != mutex_head) {
++            bool bql = bql_locked();
++
++            trace_replay_mutex_init_wait(mutex_tail - mutex_head - 1);
++            if (bql) {
++                qemu_mutex_unlock(&lock);
++                bql_unlock();
++                qemu_mutex_lock(&lock);
++            }
++            while (id != mutex_head) {
++                qemu_cond_wait(&mutex_cond, &lock);
++            }
++            replay_locked = true;
++            /* replay_mode is NONE: nobody may have queued behind us */
++            g_assert(mutex_tail == id + 1);
++            qemu_mutex_unlock(&lock);
++            if (bql) {
++                bql_lock();
++            }
++        } else {
++            replay_locked = true;
++            qemu_mutex_unlock(&lock);
++        }
 +    }
  }
  
  bool replay_mutex_locked(void)
-@@ -266,13 +293,20 @@ void replay_mutex_lock(void)
+@@ -266,13 +322,20 @@ void replay_mutex_lock(void)
  
  void replay_mutex_unlock(void)
  {
@@ -98,3 +140,27 @@ index 4839f2b63213898461922c9d5e6fcd3c7704c2f7..7c60720cce6606585871c9dcf075c0fc
      }
  }
  
+diff --git a/replay/replay.c b/replay/replay.c
+index d9582cb2deffd5d9ded99bd7b1de345f1910d4de..0eb86c8b8e1087b1edd58ae8c674d512674c7839 100644
+--- a/replay/replay.c
++++ b/replay/replay.c
+@@ -372,8 +372,9 @@ static void replay_enable(const char *fname, int mode)
+     }
+ 
+     replay_filename = g_strdup(fname);
+-    replay_mode = mode;
++    /* before the mode leaves NONE: it may wait for a previous recording's vCPU */
+     replay_mutex_init();
++    replay_mode = mode;
+ 
+     replay_state.data_kind = -1;
+     replay_state.instruction_count = 0;
+diff --git a/replay/trace-events b/replay/trace-events
+index e9c887a6c57ca8261e0f6b210ad1e2e0ccc4cd55..f6e160aae07816c843fd6d61ccc0a5408cdbec5c 100644
+--- a/replay/trace-events
++++ b/replay/trace-events
+@@ -10,3 +10,4 @@ replay_get_qword(uint64_t qword) "%016" PRIx64
+ replay_fetch_data_kind(void) ""
+ replay_get_event(uint32_t current, uint8_t data) "#%u data=%02x"
+ replay_advance_current_icount(uint64_t current_icount, int diff) "current=%" PRIu64 " diff=%d"
++replay_mutex_init_wait(unsigned long ahead) "%lu ticket(s) from the previous recording ahead"

@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Luke Craig <lacraig3@gmail.com>
+Date: Sat, 24 Oct 2026 20:14:59 -0400
+Subject: [PATCH] replay: the replay vmstate registers once and saves with no
+ log open; a second begin works
+
+x-rr-begin-record registers the "replay" vmstate for its start snapshot
+and x-rr-end-record (0040) left it registered. Two consequences:
+
+- a second x-rr-begin-record in the same process registers it again,
+  and savevm_state_handler_insert() exits:
+      Detected duplicate SaveStateEntry: id=replay, instance_id=0x0
+- a savevm after the recording has ended runs replay_pre_save(), which
+  calls ftell() on the closed (NULL) log.
+
+Register once, and keep the section after the recording ends: snapshots
+taken while recording (the start snapshot among them) carry it, and must
+still load after x-rr-end-record (replay_post_load does nothing with
+replay off). replay_pre_save() saves offset 0 when no log is open.
+
+Also: don't add a chardev to the replay list twice (each begin registers
+its chardevs again); register replay_finish() with atexit() once, not
+per begin; and x-rr-end-record restarts a VM it stopped even if
+switching icount off fails.
+---
+ replay/replay-begin.c    |  5 ++---
+ replay/replay-char.c     |  3 ++-
+ replay/replay-snapshot.c | 20 ++++++++++++++++++--
+ replay/replay.c          |  7 ++++++-
+ 4 files changed, 28 insertions(+), 7 deletions(-)
+
+diff --git a/replay/replay-begin.c b/replay/replay-begin.c
+index a88b16186de4b23731bb17d72d38125898f673bf..fc2aef535d64e2cd9ebceece53a781287d8c2e22 100644
+--- a/replay/replay-begin.c
++++ b/replay/replay-begin.c
+@@ -391,9 +391,8 @@ void qmp_x_rr_end_record(Error **errp)
+     replay_finish();
+     if (icount_by_begin) {
+         icount_by_begin = false;
+-        if (!icount_disable_runtime(errp)) {
+-            return;
+-        }
++        /* on failure the recording has still ended: keep the VM running */
++        icount_disable_runtime(errp);
+     }
+     if (was_running) {
+         vm_start();
+diff --git a/replay/replay-char.c b/replay/replay-char.c
+index ca5268cafdf0d6ead2092908e4646c619a9a82aa..5a2392d1b61b0c4fd51f5e41b53c10bfb2a4e92b 100644
+--- a/replay/replay-char.c
++++ b/replay/replay-char.c
+@@ -43,7 +43,8 @@ static int find_char_driver(Chardev *chr)
+ 
+ void replay_register_char_driver(Chardev *chr)
+ {
+-    if (replay_mode == REPLAY_MODE_NONE) {
++    /* each x-rr-begin-record registers its chardevs again */
++    if (replay_mode == REPLAY_MODE_NONE || find_char_driver(chr) >= 0) {
+         return;
+     }
+     char_drivers = g_realloc(char_drivers,
+diff --git a/replay/replay-snapshot.c b/replay/replay-snapshot.c
+index 3c0a89442a94e2b4164e9e2cff396b57e80b16a8..35ed686bc378220440c311fa39b210a6e06ca5f0 100644
+--- a/replay/replay-snapshot.c
++++ b/replay/replay-snapshot.c
+@@ -22,7 +22,13 @@
+ static int replay_pre_save(void *opaque)
+ {
+     ReplayState *state = opaque;
+-    state->file_offset = ftell(replay_file);
++
++    /*
++     * The section stays registered after x-rr-end-record (a snapshot taken
++     * during the recording, its start snapshot included, still loads), so a
++     * savevm may run with no log open.
++     */
++    state->file_offset = replay_file ? ftell(replay_file) : 0;
+ 
+     return 0;
+ }
+@@ -65,9 +71,19 @@ static const VMStateDescription vmstate_replay = {
+     },
+ };
+ 
++static bool replay_vmstate_registered;
++
+ void replay_vmstate_register(void)
+ {
+-    vmstate_register(NULL, 0, &vmstate_replay, &replay_state);
++    /*
++     * x-rr-begin-record/-replay call this for each recording.  Register
++     * once and never unregister: snapshots taken while recording carry the
++     * section, and must still load after the recording ends.
++     */
++    if (!replay_vmstate_registered) {
++        vmstate_register(NULL, 0, &vmstate_replay, &replay_state);
++        replay_vmstate_registered = true;
++    }
+ }
+ 
+ void replay_vmstate_init(void)
+diff --git a/replay/replay.c b/replay/replay.c
+index 0eb86c8b8e1087b1edd58ae8c674d512674c7839..8d8a4e4553b9746f4980c93d1d31b6d29699570a 100644
+--- a/replay/replay.c
++++ b/replay/replay.c
+@@ -348,6 +348,7 @@ G_NORETURN void replay_sync_error(const char *error)
+ 
+ static void replay_enable(const char *fname, int mode)
+ {
++    static bool atexit_done;
+     const char *fmode = NULL;
+     assert(!replay_file);
+ 
+@@ -363,7 +364,11 @@ static void replay_enable(const char *fname, int mode)
+         exit(1);
+     }
+ 
+-    atexit(replay_finish);
++    /* x-rr-begin-record/-replay enable again for each recording */
++    if (!atexit_done) {
++        atexit(replay_finish);
++        atexit_done = true;
++    }
+ 
+     replay_file = fopen(fname, fmode);
+     if (replay_file == NULL) {
