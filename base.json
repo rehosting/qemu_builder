@@ -4,6 +4,6 @@
     "url": "https://download.qemu.org/qemu-11.1.0.tar.xz",
     "hash": "sha256-buHRph9oISR2snEIwm2l9EncCbYm1C+CeboNwuCPqFg=",
     "sha256": "6ee1d1a61f68212476b27108c26da5f449dc09b626d42f8279ba0dc2e08fa858",
-    "patchedTree": "8e73d2b9267abe18cc12690fc8cc4e53d86921cd"
+    "patchedTree": "a92581d2679d4a1c2209553de120388cd0d64085"
   }
 }
