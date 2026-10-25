@@ -24,6 +24,7 @@
 #include "panda/callbacks/cb-support.h"
 #include "panda/wrap_ops.h"
 #include "accel/tcg/hooks.h"
+#include "hw/core/panda-modules.h"
 
 void panda_mark_hook_address(target_ulong pc)
 {
@@ -79,6 +80,8 @@ void panda_main_loop_kick(void) {
  */
 int panda_snap(char *snapshot_name) {
     Error *err = NULL;
+
+    panda_modules_check_vmstate("savevm");
     if (!save_snapshot(snapshot_name, true, NULL, false, NULL, &err)) {
         error_report_err(err);
         return -1;

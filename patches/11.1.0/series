@@ -66,3 +66,6 @@
 11.1.0/0120-replay-the-replay-mutex-pairs-on-its-holder-not-on-r.patch
 11.1.0/0121-accel-tcg-rr-vCPU-loop-takes-the-replay-mutex-if-rep.patch
 11.1.0/0122-replay-x-rr-end-record-unregisters-the-replay-vmstat.patch
+11.1.0/0130-module-load-panda-modules-by-path-checked-against-th.patch
+11.1.0/0131-vl-M-PATH-NAME-and-module-PATH-load-panda-modules.patch
+11.1.0/0132-hw-core-build-the-configurable-machine-and-its-QAPI-.patch

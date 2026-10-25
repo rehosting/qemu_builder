@@ -68,6 +68,7 @@
 #include "exec/cputlb.h"
 #include "exec/translation-block.h"
 #include "hw/core/cpu.h"
+#include "hw/core/panda-modules.h"
 #ifdef TARGET_ARM
 #include "target/arm/internals.h"
 #endif
@@ -407,6 +408,7 @@ int panda_fast_snap(void) {
     if (!fast_supported("panda_fast_snap")) {
         return -1;
     }
+    panda_modules_check_vmstate("fast restore");
     if (runstate_is_running()) {
         vm_stop(RUN_STATE_SAVE_VM);
     }
